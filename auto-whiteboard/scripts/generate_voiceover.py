@@ -52,6 +52,28 @@ def text_hash(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def stable_hash(payload):
+    data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def tts_cache_identity(config, reference_audio, tone):
+    return {
+        "provider": config.get("TTS", "provider", fallback="runninghub"),
+        "voice_id": config.get("TTS", "voice_id", fallback="default"),
+        "reference_audio": reference_audio or "",
+        "tone": tone or "",
+        "app_id": RUNNINGHUB_TTS_APP_ID,
+    }
+
+
+def segment_cache_hash(text, identity):
+    return stable_hash({
+        "text": text,
+        "tts_identity": identity,
+    })
+
+
 def get_audio_duration(audio_path):
     try:
         result = subprocess.run(
@@ -272,7 +294,7 @@ def generate_tts_runninghub(text, output_path, api_key, reference_audio=None, to
     return duration
 
 
-def generate_one_segment(idx, sentence_text, audio_path, api_key, reference_audio, tone, retries):
+def generate_one_segment(idx, sentence_text, audio_path, api_key, reference_audio, tone, retries, cache_hash):
     last_error = None
     for attempt in range(1, retries + 1):
         try:
@@ -284,6 +306,7 @@ def generate_one_segment(idx, sentence_text, audio_path, api_key, reference_audi
                 "audio_path": os.path.abspath(audio_path),
                 "duration": duration,
                 "text_hash": text_hash(sentence_text),
+                "cache_hash": cache_hash,
                 "text": sentence_text,
                 "reused": False,
             }
@@ -304,6 +327,7 @@ def normalize_sentence(sentence):
 def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False):
     api_key = get_api_key(config)
     reference_audio, tone = load_voice_settings(config)
+    cache_identity = tts_cache_identity(config, reference_audio, tone)
     retries = config.getint("TTS", "retries", fallback=3)
 
     temp_dir = os.path.join(output_dir, "temp_audio")
@@ -330,9 +354,10 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
     for idx, sentence_text in enumerate(normalized, start=1):
         audio_path = os.path.join(temp_dir, f"segment_{idx:03d}.mp3")
         key = str(idx)
-        expected_hash = text_hash(sentence_text)
+        expected_text_hash = text_hash(sentence_text)
+        expected_cache_hash = segment_cache_hash(sentence_text, cache_identity)
         manifest_entry = manifest.get(key) if isinstance(manifest.get(key), dict) else {}
-        hash_matches = bool(manifest_entry) and manifest_entry.get("text_hash") == expected_hash
+        hash_matches = bool(manifest_entry) and manifest_entry.get("cache_hash") == expected_cache_hash
 
         if not force_tts and hash_matches and is_valid_audio(audio_path):
             duration = get_audio_duration(audio_path)
@@ -340,14 +365,15 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
                 "index": idx,
                 "audio_path": os.path.abspath(audio_path),
                 "duration": duration,
-                "text_hash": expected_hash,
+                "text_hash": expected_text_hash,
+                "cache_hash": expected_cache_hash,
                 "text": sentence_text,
                 "reused": True,
             }
             print(f"  [{idx}/{total}] reuse {os.path.basename(audio_path)} ({duration:.2f}s)")
             continue
 
-        pending.append((idx, sentence_text, audio_path))
+        pending.append((idx, sentence_text, audio_path, expected_cache_hash))
 
     if pending:
         with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
@@ -361,8 +387,9 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
                     reference_audio,
                     tone,
                     retries,
+                    expected_cache_hash,
                 ): (idx, sentence_text)
-                for idx, sentence_text, audio_path in pending
+                for idx, sentence_text, audio_path, expected_cache_hash in pending
             }
 
             for future in as_completed(futures):
@@ -372,6 +399,8 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
                 print(f"  [{idx}/{total}] generated ({result['duration']:.2f}s): {sentence_text[:36]}")
                 manifest[str(idx)] = {
                     "text_hash": result["text_hash"],
+                    "cache_hash": result["cache_hash"],
+                    "tts_identity": cache_identity,
                     "text": sentence_text,
                     "audio_path": result["audio_path"],
                     "duration": result["duration"],
@@ -393,6 +422,8 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
     for result in ordered:
         manifest[str(result["index"])] = {
             "text_hash": result["text_hash"],
+            "cache_hash": result["cache_hash"],
+            "tts_identity": cache_identity,
             "text": result["text"],
             "audio_path": result["audio_path"],
             "duration": result["duration"],

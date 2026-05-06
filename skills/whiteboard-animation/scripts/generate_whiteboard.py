@@ -19,7 +19,7 @@ _ASSETS_DIR = _SCRIPT_DIR.parent / "assets"
 HAND_PATH = str(_ASSETS_DIR / "drawing-hand.png")
 
 # === 固定算法参数 ===
-FRAME_RATE = 60  # 输出视频帧率；越高越流畅，文件体积和生成帧数也会增加
+FRAME_RATE = 30  # 输出视频帧率；30fps 对白板动画足够顺滑，生成帧数比 60fps 少一半
 SPLIT_LEN = 10  # 网格切分边长（像素）；越小绘制越细，计算量越大
 MAX_1080P = True  # 是否将输入图最长边限制到 1080 像素，保证输出分辨率可控
 DEFAULT_TOTAL_DURATION_SECONDS = 10  # 未传 --duration 时的视频默认总时长（秒）
@@ -143,23 +143,27 @@ def compute_phase_frames(total_duration_ms, frame_rate=FRAME_RATE):
     若动画时长无法被权重和整除，则将余数补偿给停留阶段，避免比例分配丢精度。
     """
     phase_weight_total = SKETCH_PHASE_WEIGHT + COLOR_PHASE_WEIGHT
-    hold_ms = HOLD_PHASE_DURATION_SECONDS * 1000
-    anim_ms = total_duration_ms - hold_ms
-    remainder = anim_ms % phase_weight_total
-    if remainder != 0:
+    total_duration_ms = max(1, total_duration_ms)
+    base_hold_ms = HOLD_PHASE_DURATION_SECONDS * 1000
+    if total_duration_ms <= base_hold_ms:
+        hold_ms = max(0, int(total_duration_ms * 0.2))
+    else:
+        hold_ms = base_hold_ms
+    anim_ms = max(0, total_duration_ms - hold_ms)
+    remainder = anim_ms % phase_weight_total if anim_ms > 0 else 0
+    if remainder != 0 and anim_ms > phase_weight_total:
         anim_ms -= remainder
         hold_ms += remainder
 
     hold_frames = round(hold_ms * frame_rate / 1000)
-    sketch_frames = round(
-        anim_ms * SKETCH_PHASE_WEIGHT / phase_weight_total * frame_rate / 1000
-    )
-    color_frames = round(
-        anim_ms * COLOR_PHASE_WEIGHT / phase_weight_total * frame_rate / 1000
-    )
-    if sketch_frames <= 0 and color_frames <= 0:
-        sketch_frames = 0
-        color_frames = 0
+    anim_frames = round(anim_ms * frame_rate / 1000)
+    if anim_ms > 0 and anim_frames <= 0:
+        anim_frames = 1
+    sketch_frames = round(anim_frames * SKETCH_PHASE_WEIGHT / phase_weight_total)
+    color_frames = max(0, anim_frames - sketch_frames)
+    if anim_frames >= 2 and color_frames <= 0:
+        color_frames = 1
+        sketch_frames = anim_frames - color_frames
 
     return {
         "hold_ms": hold_ms,
@@ -1345,6 +1349,12 @@ def parse_args():
         )
     )
     parser.add_argument(
+        "--fps",
+        type=int,
+        default=FRAME_RATE,
+        help=f"输出视频帧率 (默认: {FRAME_RATE})"
+    )
+    parser.add_argument(
         "--no-hand",
         action="store_true",
         help="禁用手部覆盖"
@@ -1358,6 +1368,7 @@ def main():
     image_path = args.image_path
     output_dir = args.output_dir
     duration = args.duration
+    frame_rate = max(12, min(args.fps, 60))
     draw_hand = not args.no_hand
     skip_rate = SKIP_RATE
 
@@ -1396,7 +1407,7 @@ def main():
 
     # 初始化变量
     variables = {
-        "frame_rate": FRAME_RATE,
+        "frame_rate": frame_rate,
         "resize_wd": img_wd,
         "resize_ht": img_ht,
         "split_len": SPLIT_LEN,
@@ -1435,14 +1446,14 @@ def main():
         print(f"  手部尺寸: {variables['hand_wd']}x{variables['hand_ht']}")
 
     # 根据 duration（毫秒）计算每阶段目标格子数
-    phase_frames = compute_phase_frames(duration, frame_rate=FRAME_RATE)
+    phase_frames = compute_phase_frames(duration, frame_rate=frame_rate)
     hold_frames = phase_frames["hold_frames"]
     sketch_frames = phase_frames["sketch_frames"]
     color_frames = phase_frames["color_frames"]
     sketch_target_cells = sketch_frames * skip_rate
     color_target_cells = color_frames * skip_rate
-    anim_duration = (sketch_frames + color_frames) / FRAME_RATE
-    hold_duration = hold_frames / FRAME_RATE
+    anim_duration = (sketch_frames + color_frames) / frame_rate
+    hold_duration = hold_frames / frame_rate
     total_frames = sketch_frames + color_frames + hold_frames
     print(f"\n时长计算: 总时长 {duration}ms ({duration / 1000:.3f}s) = {total_frames}帧")
     print(
@@ -1453,12 +1464,13 @@ def main():
         f"  线稿: {sketch_frames}帧, 上色: {color_frames}帧 "
         f"({phase_frames['phase_ratio_label']})"
     )
+    print(f"  fps={frame_rate}")
     print(f"  skip_rate={skip_rate}, 线稿格子数: {sketch_target_cells}, 上色格子数: {color_target_cells}")
 
     # 创建视频写入器
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     variables["video_object"] = cv2.VideoWriter(
-        raw_video_path, fourcc, FRAME_RATE, (img_wd, img_ht)
+        raw_video_path, fourcc, frame_rate, (img_wd, img_ht)
     )
 
     # 创建空白画布

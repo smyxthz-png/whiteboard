@@ -11,6 +11,7 @@ import json
 import subprocess
 import configparser
 import shutil
+import hashlib
 
 
 def check_ffmpeg():
@@ -39,6 +40,78 @@ def load_config(config_path):
         raise ValueError(f"配置文件读取失败: {config_path}")
 
     return config
+
+
+def stable_hash(payload):
+    data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(data.encode('utf-8')).hexdigest()
+
+
+def read_json_file(path, default=None):
+    try:
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def write_json_atomic(path, payload):
+    temp_path = f"{path}.tmp"
+    with open(temp_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(temp_path, path)
+
+
+def is_valid_asset_file(path, min_bytes=1024):
+    try:
+        return bool(path) and os.path.exists(path) and os.path.getsize(path) >= min_bytes
+    except OSError:
+        return False
+
+
+def read_env_values(env_path):
+    values = {}
+    if not os.path.exists(env_path):
+        return values
+    with open(env_path, 'r', encoding='utf-8-sig') as f:
+        for line in f:
+            trimmed = line.strip()
+            if not trimmed or trimmed.startswith('#') or '=' not in trimmed:
+                continue
+            key, value = trimmed.split('=', 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def image_generation_identity(skill_dir):
+    env_values = read_env_values(os.path.join(skill_dir, '.env'))
+    provider = (
+        os.environ.get('IMAGE_PROVIDER')
+        or env_values.get('IMAGE_PROVIDER')
+        or 'runninghub'
+    ).strip().lower()
+    model = (
+        os.environ.get('MACODE_IMAGE_MODEL')
+        or env_values.get('MACODE_IMAGE_MODEL')
+        or ('gpt-image-2' if provider in {'macode', 'macode_image2', 'image2', 'gpt-image-2'} else '')
+    ).strip()
+    return {
+        'provider': provider,
+        'model': model,
+    }
+
+
+def valid_manifest_images(manifest, expected_hash, expected_count):
+    if not isinstance(manifest, dict):
+        return None
+    if manifest.get('prompt_hash') != expected_hash:
+        return None
+    image_files = manifest.get('image_files')
+    if not isinstance(image_files, list) or len(image_files) != expected_count:
+        return None
+    if not all(is_valid_asset_file(path) for path in image_files):
+        return None
+    return image_files
 
 
 def validate_api_key(config, section, key_name):
@@ -270,7 +343,7 @@ def parse_generated_image_results(stdout_text, expected_count):
                 )
                 return None
 
-            missing = [path for path in image_files if not os.path.exists(path)]
+            missing = [path for path in image_files if not is_valid_asset_file(path)]
             if missing:
                 print("[ERROR] Generated image files are missing:", file=sys.stderr)
                 for path in missing:
@@ -282,7 +355,35 @@ def parse_generated_image_results(stdout_text, expected_count):
     return None
 
 
-def generate_images(skill_dir, storyboard_path, image_dir, python_path):
+def parse_batch_video_results(stdout_text, expected_count):
+    """Extract ordered video paths from batch_generate.py output."""
+    for line in reversed(stdout_text.splitlines()):
+        if line.startswith('__RESULTS__'):
+            try:
+                video_files = json.loads(line.replace('__RESULTS__', '', 1))
+            except json.JSONDecodeError as e:
+                print(f"[ERROR] Failed to parse batch video JSON: {e}", file=sys.stderr)
+                return None
+
+            if not isinstance(video_files, list) or len(video_files) != expected_count:
+                print(
+                    f"[ERROR] Video result count mismatch: expected {expected_count}, got {len(video_files) if isinstance(video_files, list) else 'invalid'}",
+                    file=sys.stderr
+                )
+                return None
+
+            missing = [path for path in video_files if not os.path.exists(path) or os.path.getsize(path) <= 0]
+            if missing:
+                print("[ERROR] Video segment files are missing or empty:", file=sys.stderr)
+                for path in missing:
+                    print(f"  - {path}", file=sys.stderr)
+                return None
+
+            return video_files
+    return None
+
+
+def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=False):
     """生成白板图片"""
     print("\n[IMAGE] Generating whiteboard images...")
 
@@ -322,6 +423,32 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path):
 
         print(f"[OK] Generated {len(prompts)} image prompts")
 
+        identity = image_generation_identity(skill_dir)
+        prompt_hash = stable_hash({
+            'prompts': prompts,
+            'aspect_ratio': '16:9',
+            'identity': identity,
+        })
+        image_cache_dir = os.path.join(image_dir, f"cache_{prompt_hash[:16]}")
+        manifest_path = os.path.join(image_cache_dir, "image_manifest.json")
+        os.makedirs(image_cache_dir, exist_ok=True)
+
+        if force:
+            for name in os.listdir(image_cache_dir):
+                if name.lower().endswith(('.png', '.jpg', '.jpeg', '.tmp')):
+                    os.remove(os.path.join(image_cache_dir, name))
+            if os.path.exists(manifest_path):
+                os.remove(manifest_path)
+        else:
+            cached_images = valid_manifest_images(
+                read_json_file(manifest_path),
+                prompt_hash,
+                len(prompts),
+            )
+            if cached_images:
+                print(f"[REUSE] Image cache hit: {len(cached_images)} images ({prompt_hash[:12]})")
+                return cached_images
+
         # Generate images
         image_script = os.path.join(skill_dir, 'scripts', 'generate-image.py')
 
@@ -340,7 +467,7 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path):
             print(f"[IMAGE] This may take 5-10 minutes for API calls...")
 
             result = subprocess.run(
-                [python_path, image_script, prompts_json, '16:9', image_dir],
+                [python_path, image_script, prompts_json, '16:9', image_cache_dir],
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
@@ -364,18 +491,24 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path):
         if image_files is None:
             # 兼容旧脚本输出，但仍强制校验数量，避免半成功继续。
             image_files = sorted([
-                os.path.join(image_dir, f)
-                for f in os.listdir(image_dir)
+                os.path.join(image_cache_dir, f)
+                for f in os.listdir(image_cache_dir)
                 if f.endswith(('.png', '.jpg', '.jpeg'))
             ])
 
-        if len(image_files) != len(prompts):
+        if len(image_files) != len(prompts) or not all(is_valid_asset_file(path) for path in image_files):
             print(
                 f"[ERROR] Image generation incomplete: expected {len(prompts)}, got {len(image_files)}",
                 file=sys.stderr
             )
             return None
 
+        write_json_atomic(manifest_path, {
+            'prompt_hash': prompt_hash,
+            'identity': identity,
+            'prompt_count': len(prompts),
+            'image_files': image_files,
+        })
         print(f"[OK] Image generation complete: {len(image_files)} images")
         return image_files
 
@@ -387,7 +520,7 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path):
         return None
 
 
-def generate_whiteboard_videos(skill_dir, image_files, durations, video_dir, python_path):
+def generate_whiteboard_videos(skill_dir, image_files, durations, video_dir, python_path, fps=30, jobs=2, force=False):
     """生成白板动画视频"""
     print("\n[VIDEO] Generating whiteboard animation videos...")
 
@@ -412,8 +545,12 @@ def generate_whiteboard_videos(skill_dir, image_files, durations, video_dir, pyt
         ] + image_files + [
             '--durations'
         ] + [str(d) for d in durations] + [
-            '--output-dir', video_dir
+            '--output-dir', video_dir,
+            '--fps', str(fps),
+            '--jobs', str(jobs),
         ]
+        if force:
+            cmd.append('--force')
 
         # 使用环境变量强制UTF-8编码
         env = os.environ.copy()
@@ -438,12 +575,12 @@ def generate_whiteboard_videos(skill_dir, image_files, durations, video_dir, pyt
             print(stderr_text, file=sys.stderr)
             return None
 
-        # 获取生成的视频列表
-        video_files = sorted([
-            os.path.join(video_dir, f)
-            for f in os.listdir(video_dir)
-            if f.endswith('.mp4')
-        ])
+        video_files = parse_batch_video_results(stdout_text, len(image_files))
+        if video_files is None:
+            video_files = [
+                os.path.join(video_dir, f"scene_{i + 1:03d}_h264.mp4")
+                for i in range(len(image_files))
+            ]
 
         if len(video_files) != len(image_files):
             print(
@@ -675,6 +812,10 @@ def main():
     parser.add_argument("--config", default="../config/config.ini", help="配置文件路径")
     parser.add_argument("--audio", help="已有音频文件路径（可选，用于 standalone 合并）")
     parser.add_argument("--skip-audio", action="store_true", help="只生成无声白板视频，不重新生成 TTS")
+    parser.add_argument("--fps", type=int, help="白板动画帧率，默认读取 config [Video] fps")
+    parser.add_argument("--jobs", type=int, help="白板动画并发任务数，默认读取 config [Advanced] whiteboard_jobs")
+    parser.add_argument("--force-images", action="store_true", help="重新生成白板图片")
+    parser.add_argument("--force-video-segments", action="store_true", help="重新生成白板动画分段")
 
     args = parser.parse_args()
 
@@ -756,16 +897,33 @@ def main():
         storyboard = json.load(f)
         durations = [scene['duration'] for scene in storyboard['scenes']]
 
+    fps = args.fps or config.getint('Video', 'fps', fallback=30)
+    jobs = args.jobs or config.getint('Advanced', 'whiteboard_jobs', fallback=2)
+    fps = max(12, min(fps, 60))
+    jobs = max(1, min(jobs, len(durations)))
+    print(f"[CONFIG] Whiteboard render: fps={fps}, jobs={jobs}, force={args.force_video_segments}")
+
     # 生成图片
     image_files = generate_images(
-        skill_dir, storyboard_path, dirs['imageDir'], python_path
+        skill_dir,
+        storyboard_path,
+        dirs['imageDir'],
+        python_path,
+        force=args.force_images,
     )
     if not image_files:
         sys.exit(1)
 
     # 生成视频
     video_files = generate_whiteboard_videos(
-        skill_dir, image_files, durations, dirs['videoDir'], python_path
+        skill_dir,
+        image_files,
+        durations,
+        dirs['videoDir'],
+        python_path,
+        fps=fps,
+        jobs=jobs,
+        force=args.force_video_segments,
     )
     if not video_files:
         sys.exit(1)
@@ -812,7 +970,10 @@ def main():
     result = {
         "whiteboard_video_path": os.path.abspath(merged_video),
         "scene_count": len(durations),
-        "video_segments": len(video_files)
+        "image_count": len(image_files),
+        "video_segments": len(video_files),
+        "fps": fps,
+        "whiteboard_jobs": jobs
     }
     print(f"\nRESULT_JSON={json.dumps(result, ensure_ascii=False)}")
 

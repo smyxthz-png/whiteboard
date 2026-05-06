@@ -23,6 +23,13 @@ def load_config(config_path):
     return config
 
 
+def write_json_atomic(path, payload):
+    temp_path = f"{path}.tmp"
+    with open(temp_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(temp_path, path)
+
+
 def check_ffmpeg():
     """检查 ffmpeg 是否可用"""
     if shutil.which('ffmpeg') is None:
@@ -55,11 +62,14 @@ def probe_media(path):
     data = json.loads(result.stdout)
     streams = data.get('streams', [])
     video_stream = next((s for s in streams if s.get('codec_type') == 'video'), {})
+    audio_stream = next((s for s in streams if s.get('codec_type') == 'audio'), {})
     duration = float(data.get('format', {}).get('duration') or 0)
     return {
         'width': int(video_stream.get('width') or 1920),
         'height': int(video_stream.get('height') or 1080),
         'duration': duration,
+        'video_duration': float(video_stream.get('duration') or duration or 0),
+        'audio_duration': float(audio_stream.get('duration') or duration or 0) if audio_stream else 0.0,
     }
 
 
@@ -128,6 +138,48 @@ def split_subtitle_text(text, max_chars):
     if current:
         chunks.append(current)
     return chunks
+
+
+def analyze_srt(srt_path):
+    with open(srt_path, 'r', encoding='utf-8-sig') as f:
+        content = f.read().strip()
+    if not content:
+        return {
+            'subtitle_count': 0,
+            'max_lines_per_subtitle': 0,
+            'max_chars': 0,
+        }
+
+    blocks = [block for block in re.split(r'\n\s*\n', content) if block.strip()]
+    text_blocks = []
+    for block in blocks:
+        lines = block.splitlines()
+        if len(lines) >= 3:
+            text_blocks.append(lines[2:])
+
+    return {
+        'subtitle_count': len(text_blocks),
+        'max_lines_per_subtitle': max((len(lines) for lines in text_blocks), default=0),
+        'max_chars': max((len(''.join(lines)) for lines in text_blocks), default=0),
+    }
+
+
+def analyze_ass(ass_path):
+    with open(ass_path, 'r', encoding='utf-8-sig') as f:
+        lines = f.read().splitlines()
+
+    texts = []
+    for line in lines:
+        if line.startswith('Dialogue:'):
+            parts = line.split(',', 9)
+            if len(parts) == 10:
+                texts.append(parts[9])
+
+    return {
+        'event_count': len(texts),
+        'max_lines_per_event': max((text.count('\\N') + 1 for text in texts), default=0),
+        'max_chars': max((len(text.replace('\\N', '').replace('\\n', '')) for text in texts), default=0),
+    }
 
 
 def escape_ass_text(text):
@@ -228,6 +280,8 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
     pad_duration = max(0.0, target_duration - video_info['duration'])
 
     srt_to_ass(srt_path, ass_path, config, video_info['width'], video_info['height'])
+    source_subtitle_stats = analyze_srt(srt_path)
+    display_subtitle_stats = analyze_ass(ass_path)
 
     # 获取视频编码配置
     codec = config.get('Video', 'codec', fallback='libx264')
@@ -295,12 +349,35 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
 
     # 获取输出文件信息
     file_size = os.path.getsize(output_path) / (1024 * 1024)
+    output_info = probe_media(output_path)
+    duration_delta = abs(output_info.get('video_duration', 0.0) - output_info.get('audio_duration', 0.0))
+    report = {
+        'output_path': os.path.abspath(output_path),
+        'size_mb': file_size,
+        'input_video_duration': video_info['duration'],
+        'input_audio_duration': audio_info['duration'],
+        'output_duration': output_info['duration'],
+        'output_video_duration': output_info.get('video_duration', 0.0),
+        'output_audio_duration': output_info.get('audio_duration', 0.0),
+        'output_av_delta_seconds': duration_delta,
+        'subtitle_count': source_subtitle_stats['subtitle_count'],
+        'source_max_lines_per_subtitle': source_subtitle_stats['max_lines_per_subtitle'],
+        'source_max_subtitle_chars': source_subtitle_stats['max_chars'],
+        'subtitle_event_count': display_subtitle_stats['event_count'],
+        'max_lines_per_subtitle': display_subtitle_stats['max_lines_per_event'],
+        'max_subtitle_chars': display_subtitle_stats['max_chars'],
+        'single_line_subtitles': display_subtitle_stats['max_lines_per_event'] <= 1,
+    }
+    report_path = os.path.join(os.path.dirname(output_path), 'composition_report.json')
+    write_json_atomic(report_path, report)
 
     print(f"\n[OK] 视频合成完成!")
     print(f"  [OUTPUT] 输出: {output_path}")
     print(f"  [INFO] 大小: {file_size:.2f} MB")
+    print(f"  [REPORT] 验收报告: {report_path}")
+    print(f"  [CHECK] AV delta: {duration_delta:.3f}s, subtitle lines: {display_subtitle_stats['max_lines_per_event']}")
 
-    return file_size
+    return file_size, report
 
 
 def main():
@@ -332,12 +409,15 @@ def main():
         os.makedirs(output_dir, exist_ok=True)
 
     # 合成视频
-    file_size = compose_video(args.video, args.srt, args.audio, args.output, config)
+    file_size, report = compose_video(args.video, args.srt, args.audio, args.output, config)
 
     # 输出 JSON 结果
     result = {
         "final_video_path": os.path.abspath(args.output),
-        "size_mb": file_size
+        "size_mb": file_size,
+        "report_path": os.path.join(os.path.dirname(os.path.abspath(args.output)), 'composition_report.json'),
+        "output_av_delta_seconds": report["output_av_delta_seconds"],
+        "single_line_subtitles": report["single_line_subtitles"],
     }
     print(f"\nRESULT_JSON={json.dumps(result, ensure_ascii=False)}")
 

@@ -1,0 +1,19 @@
+{
+  "name": "auto-whiteboard-video",
+  "version": "1.0.0",
+  "description": "一键生成白板动画视频的完整工作流",
+  "entry": "skill.sh",
+  "author": "Your Name",
+  "tags": ["video", "whiteboard", "animation", "tts", "automation"],
+  "requirements": {
+    "python": ">=3.12",
+    "system": ["ffmpeg"]
+  },
+  "config": {
+    "configFile": "../../auto-whiteboard/config/config.ini",
+    "requiredKeys": [
+      "RunningHubTTS.api_key",
+      "RunningHub.api_key"
+    ]
+  }
+}

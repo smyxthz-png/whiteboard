@@ -13,6 +13,7 @@ import json
 import configparser
 import subprocess
 import shutil
+import re
 
 
 def load_config(config_path):
@@ -32,7 +33,109 @@ def check_ffmpeg():
         sys.exit(1)
 
 
-def srt_to_ass(srt_path, ass_path, config):
+def probe_media(path):
+    """读取媒体尺寸和时长。"""
+    cmd = [
+        'ffprobe',
+        '-v', 'error',
+        '-show_streams',
+        '-show_format',
+        '-of', 'json',
+        path
+    ]
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        check=True
+    )
+    data = json.loads(result.stdout)
+    streams = data.get('streams', [])
+    video_stream = next((s for s in streams if s.get('codec_type') == 'video'), {})
+    duration = float(data.get('format', {}).get('duration') or 0)
+    return {
+        'width': int(video_stream.get('width') or 1920),
+        'height': int(video_stream.get('height') or 1080),
+        'duration': duration,
+    }
+
+
+def parse_srt_timestamp(timestamp):
+    """SRT 时间戳转秒。"""
+    match = re.match(r'(\d{2}):(\d{2}):(\d{2}),(\d{3})', timestamp)
+    if not match:
+        raise ValueError(f"Invalid SRT timestamp: {timestamp}")
+    hours, minutes, seconds, millis = match.groups()
+    return (
+        int(hours) * 3600
+        + int(minutes) * 60
+        + int(seconds)
+        + int(millis) / 1000.0
+    )
+
+
+def format_ass_timestamp(seconds):
+    """秒转 ASS 时间戳 H:MM:SS.cc。"""
+    seconds = max(0, seconds)
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    centis = int(round((seconds - int(seconds)) * 100))
+    if centis >= 100:
+        secs += 1
+        centis -= 100
+    if secs >= 60:
+        minutes += 1
+        secs -= 60
+    if minutes >= 60:
+        hours += 1
+        minutes -= 60
+    return f"{hours}:{minutes:02d}:{secs:02d}.{centis:02d}"
+
+
+def split_subtitle_text(text, max_chars):
+    """把字幕文本拆成多个单行事件。"""
+    text = re.sub(r'\s+', ' ', text.strip())
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks = []
+    current = ''
+    tokens = re.findall(r'.+?[，,、；;：:]|.+$', text)
+
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+        while len(token) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ''
+            chunks.append(token[:max_chars])
+            token = token[max_chars:]
+        if not token:
+            continue
+        if len(current) + len(token) <= max_chars:
+            current += token
+        else:
+            if current:
+                chunks.append(current)
+            current = token
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def escape_ass_text(text):
+    """避免字幕内容被 ASS override 解析。"""
+    return text.replace('{', '(').replace('}', ')').replace('\n', ' ')
+
+
+def srt_to_ass(srt_path, ass_path, config, video_width=1920, video_height=1080):
     """
     将 SRT 转换为 ASS 格式（支持样式）
     """
@@ -43,28 +146,28 @@ def srt_to_ass(srt_path, ass_path, config):
         srt_content = f.read()
 
     # 解析 SRT
-    import re
     pattern = r'(\d+)\n(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})\n(.*?)(?=\n\n|\Z)'
     matches = re.findall(pattern, srt_content, re.DOTALL)
 
     # 获取字幕样式配置
     font = config.get('Subtitle', 'font', fallback='Microsoft YaHei')
-    font_size = config.getint('Subtitle', 'font_size', fallback=48)
+    font_size = config.getint('Subtitle', 'font_size', fallback=40)
     primary_color = config.get('Subtitle', 'primary_color', fallback='&H00FFFFFF')
     outline_color = config.get('Subtitle', 'outline_color', fallback='&H00000000')
     back_color = config.get('Subtitle', 'back_color', fallback='&H80000000')
-    outline_width = config.getint('Subtitle', 'outline_width', fallback=3)
+    outline_width = config.getint('Subtitle', 'outline_width', fallback=2)
     shadow = config.getint('Subtitle', 'shadow', fallback=2)
     alignment = config.getint('Subtitle', 'alignment', fallback=2)
     margin_bottom = config.getint('Subtitle', 'margin_bottom', fallback=40)
     margin_lr = config.getint('Subtitle', 'margin_lr', fallback=20)
+    max_chars_per_line = config.getint('Subtitle', 'max_chars_per_line', fallback=18)
 
     # 创建 ASS 文件
     ass_header = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: 1920
-PlayResY: 1080
-WrapStyle: 0
+PlayResX: {video_width}
+PlayResY: {video_height}
+WrapStyle: 2
 ScaledBorderAndShadow: yes
 YCbCr Matrix: TV.709
 
@@ -78,18 +181,28 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     ass_events = []
     for idx, start, end, text in matches:
-        # 转换时间格式：SRT (00:00:00,000) → ASS (0:00:00.00)
-        start_ass = start.replace(',', '.')[:-1]  # 去掉最后一位毫秒
-        end_ass = end.replace(',', '.')[:-1]
+        start_sec = parse_srt_timestamp(start)
+        end_sec = parse_srt_timestamp(end)
+        duration = max(0.01, end_sec - start_sec)
 
-        # 移除前导零
-        start_ass = start_ass.lstrip('0').lstrip(':') or '0:00:00.00'
-        end_ass = end_ass.lstrip('0').lstrip(':') or '0:00:00.00'
+        chunks = split_subtitle_text(text, max_chars_per_line)
+        total_chars = max(1, sum(len(chunk) for chunk in chunks))
+        cursor = start_sec
 
-        # 清理文本
-        text = text.strip().replace('\n', '\\N')
+        for chunk_index, chunk in enumerate(chunks):
+            if chunk_index == len(chunks) - 1:
+                chunk_end = end_sec
+            else:
+                chunk_duration = duration * (len(chunk) / total_chars)
+                chunk_end = min(end_sec, cursor + chunk_duration)
 
-        ass_events.append(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{text}")
+            ass_events.append(
+                "Dialogue: 0,"
+                f"{format_ass_timestamp(cursor)},"
+                f"{format_ass_timestamp(chunk_end)},"
+                f"Default,,0,0,0,,{escape_ass_text(chunk)}"
+            )
+            cursor = chunk_end
 
     ass_content = ass_header + '\n'.join(ass_events)
 
@@ -108,7 +221,13 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
     # 创建临时 ASS 文件
     temp_dir = os.path.dirname(output_path)
     ass_path = os.path.join(temp_dir, 'temp_subtitles.ass')
-    srt_to_ass(srt_path, ass_path, config)
+
+    video_info = probe_media(video_path)
+    audio_info = probe_media(audio_path)
+    target_duration = audio_info['duration'] or video_info['duration']
+    pad_duration = max(0.0, target_duration - video_info['duration'])
+
+    srt_to_ass(srt_path, ass_path, config, video_info['width'], video_info['height'])
 
     # 获取视频编码配置
     codec = config.get('Video', 'codec', fallback='libx264')
@@ -121,17 +240,24 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
     # 注意：Windows 路径需要转义
     ass_path_escaped = ass_path.replace('\\', '/').replace(':', '\\:')
 
+    video_filter = (
+        f"[0:v]tpad=stop_mode=clone:stop_duration={pad_duration:.3f},"
+        f"trim=duration={target_duration:.3f},"
+        f"setpts=PTS-STARTPTS,"
+        f"ass='{ass_path_escaped}'[v]"
+    )
+
     cmd = [
         'ffmpeg',
         '-i', video_path,           # 输入视频
         '-i', audio_path,            # 输入音频
-        '-vf', f"ass='{ass_path_escaped}'",  # 烧录字幕
+        '-filter_complex', video_filter,
         '-c:v', codec,               # 视频编码
         '-preset', preset,           # 编码预设
         '-crf', str(crf),            # 视频质量
         '-c:a', audio_codec,         # 音频编码
         '-b:a', audio_bitrate,       # 音频比特率
-        '-map', '0:v',               # 使用第一个输入的视频
+        '-map', '[v]',               # 使用校准后的字幕视频
         '-map', '1:a',               # 使用第二个输入的音频
         '-y',                        # 覆盖输出文件
         output_path
@@ -140,6 +266,8 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
     print(f"  [CONFIG] ffmpeg 参数:")
     print(f"     视频编码: {codec}, CRF: {crf}, 预设: {preset}")
     print(f"     音频编码: {audio_codec}, 比特率: {audio_bitrate}")
+    print(f"     视频尺寸: {video_info['width']}x{video_info['height']}")
+    print(f"     时长校准: video={video_info['duration']:.3f}s, audio={target_duration:.3f}s, pad={pad_duration:.3f}s")
 
     # 执行 ffmpeg
     try:

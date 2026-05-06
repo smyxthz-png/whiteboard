@@ -74,6 +74,65 @@ def simple_split(text):
     return sentences
 
 
+def split_long_sentence(sentence, max_chars):
+    """将过长句子拆成适合单行字幕的短句。"""
+    import re
+
+    sentence = sentence.strip()
+    if len(sentence) <= max_chars:
+        return [sentence]
+
+    tokens = re.findall(r'.+?[，,、；;：:]|.+$', sentence)
+    chunks = []
+    current = ''
+
+    def append_piece(piece):
+        piece = piece.strip()
+        if not piece:
+            return
+        while len(piece) > max_chars:
+            chunks.append(piece[:max_chars])
+            piece = piece[max_chars:]
+        if piece:
+            chunks.append(piece)
+
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+
+        if len(token) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ''
+            append_piece(token)
+        elif len(current) + len(token) <= max_chars:
+            current += token
+        else:
+            if current:
+                chunks.append(current)
+            current = token
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+def normalize_sentences(sentences, max_chars):
+    """确保每条字幕/配音句子不超过单行字幕长度。"""
+    normalized = []
+    for sentence in sentences:
+        if isinstance(sentence, dict):
+            text = sentence.get('text', '').strip()
+        else:
+            text = str(sentence).strip()
+        if not text:
+            continue
+        normalized.extend(split_long_sentence(text, max_chars))
+    return normalized
+
+
 def calculate_duration(text, speed=4.0):
     """计算句子朗读时长（秒）"""
     char_count = len(text)
@@ -151,6 +210,8 @@ def main():
     else:
         print("[WARN] 未配置 Claude API Key，使用简单分句", file=sys.stderr)
         sentences = simple_split(text)
+
+    sentences = normalize_sentences(sentences, max_chars)
 
     print(f"[SUCCESS] 分句完成: {len(sentences)} 句")
     for i, s in enumerate(sentences, 1):

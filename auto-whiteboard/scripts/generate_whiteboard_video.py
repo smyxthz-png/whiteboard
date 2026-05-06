@@ -90,14 +90,35 @@ def image_generation_identity(skill_dir):
         or env_values.get('IMAGE_PROVIDER')
         or 'runninghub'
     ).strip().lower()
+    normalized_provider = provider
+    if provider in {'t8', 't8_image2', 't8star', 't8star_image2'}:
+        normalized_provider = 't8_image2'
+    elif provider in {'macode', 'macode_image2', 'image2', 'gpt-image-2'}:
+        normalized_provider = 'macode_image2'
     model = (
-        os.environ.get('MACODE_IMAGE_MODEL')
+        os.environ.get('T8_IMAGE_MODEL')
+        or env_values.get('T8_IMAGE_MODEL')
+        or os.environ.get('MACODE_IMAGE_MODEL')
         or env_values.get('MACODE_IMAGE_MODEL')
-        or ('gpt-image-2' if provider in {'macode', 'macode_image2', 'image2', 'gpt-image-2'} else '')
+        or ('gpt-image-2' if normalized_provider in {'t8_image2', 'macode_image2'} else '')
+    ).strip()
+    size = (
+        os.environ.get('T8_IMAGE_SIZE')
+        or env_values.get('T8_IMAGE_SIZE')
+        or os.environ.get('MACODE_IMAGE_SIZE')
+        or env_values.get('MACODE_IMAGE_SIZE')
+        or ''
+    ).strip()
+    quality = (
+        os.environ.get('T8_IMAGE_QUALITY')
+        or env_values.get('T8_IMAGE_QUALITY')
+        or ''
     ).strip()
     return {
-        'provider': provider,
+        'provider': normalized_provider,
         'model': model,
+        'size': size,
+        'quality': quality,
     }
 
 

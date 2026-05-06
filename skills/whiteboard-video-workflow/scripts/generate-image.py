@@ -8,6 +8,7 @@ import random
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
@@ -26,6 +27,8 @@ POLL_MAX_RETRIES = 5
 
 RETRY_BASE_DELAY_S = 3.0
 POLL_INTERVAL_S = 5.0
+T8_POLL_INTERVAL_S = 3.0
+T8_MAX_WAIT_S = 900
 
 BATCH_CONCURRENCY = 10
 
@@ -79,6 +82,8 @@ def load_env():
 
 def get_image_provider():
     provider = os.environ.get('IMAGE_PROVIDER', 'runninghub').strip().lower()
+    if provider in {'t8', 't8_image2', 't8star', 't8star_image2'}:
+        return 't8_image2'
     if provider in {'macode', 'macode_image2', 'image2', 'gpt-image-2'}:
         return 'macode_image2'
     return 'runninghub'
@@ -86,8 +91,15 @@ def get_image_provider():
 
 def get_batch_concurrency():
     provider = get_image_provider()
-    env_name = 'MACODE_IMAGE_CONCURRENCY' if provider == 'macode_image2' else 'IMAGE_BATCH_CONCURRENCY'
-    default_value = 3 if provider == 'macode_image2' else BATCH_CONCURRENCY
+    if provider == 't8_image2':
+        env_name = 'T8_IMAGE_CONCURRENCY'
+        default_value = 3
+    elif provider == 'macode_image2':
+        env_name = 'MACODE_IMAGE_CONCURRENCY'
+        default_value = 3
+    else:
+        env_name = 'IMAGE_BATCH_CONCURRENCY'
+        default_value = BATCH_CONCURRENCY
     try:
         return max(1, int(os.environ.get(env_name, default_value)))
     except ValueError:
@@ -95,12 +107,105 @@ def get_batch_concurrency():
 
 
 def image_size_for_aspect_ratio(aspect_ratio):
+    provider = get_image_provider()
+    if provider == 't8_image2' and os.environ.get('T8_IMAGE_SIZE'):
+        return os.environ['T8_IMAGE_SIZE']
+    if provider == 'macode_image2' and os.environ.get('MACODE_IMAGE_SIZE'):
+        return os.environ['MACODE_IMAGE_SIZE']
+
     sizes = {
         '16:9': '1536x864',
         '9:16': '864x1536',
         '1:1': '1024x1024',
     }
     return sizes.get(aspect_ratio, '1536x864')
+
+
+def decode_data_uri(data_uri):
+    if not data_uri.startswith('data:image') or ',' not in data_uri:
+        return None
+    return base64.b64decode(data_uri.split(',', 1)[1])
+
+
+def save_image_result(image_result, filepath):
+    b64_json = image_result.get('b64_json')
+    if b64_json:
+        Path(filepath).write_bytes(base64.b64decode(b64_json))
+        return filepath
+
+    image_url = image_result.get('url')
+    if image_url and image_url.startswith('data:image'):
+        image_bytes = decode_data_uri(image_url)
+        if not image_bytes:
+            raise RetryableError('Invalid data URI in image response.')
+        Path(filepath).write_bytes(image_bytes)
+        return filepath
+    if image_url:
+        parsed = urlparse(image_url)
+        if parsed.scheme not in {'http', 'https'}:
+            raise RetryableError(f'Unsupported image URL scheme: {parsed.scheme}')
+        download_file(image_url, filepath)
+        return filepath
+
+    raise RetryableError('Image response did not contain b64_json or url.')
+
+
+def normalized_openai_base_url(env_name, default):
+    base_url = os.environ.get(env_name, default).strip().rstrip('/')
+    if not base_url:
+        return ''
+    if not base_url.endswith('/v1'):
+        base_url = f'{base_url}/v1'
+    return base_url
+
+
+def request_openai_json_sync(method, url, api_key, body=None, timeout=180):
+    payload = None if body is None else json.dumps(body, ensure_ascii=False).encode('utf-8')
+    req = Request(url, data=payload, method=method)
+    req.add_header('Authorization', f'Bearer {api_key}')
+    if payload is not None:
+        req.add_header('Content-Type', 'application/json; charset=utf-8')
+
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            data = resp.read().decode('utf-8')
+            return json.loads(data)
+    except HTTPError as e:
+        body_text = e.read().decode('utf-8', errors='replace')
+        if e.code in {400, 401, 403}:
+            raise FatalError(f'HTTP {e.code}: {body_text}')
+        if e.code == 429:
+            raise RetryableError(f'HTTP 429 (rate limited): {body_text}', is_rate_limit=True)
+        raise RetryableError(f'HTTP {e.code}: {body_text}')
+    except json.JSONDecodeError as e:
+        raise RetryableError(f'Failed to parse image provider response: {e}')
+    except Exception as e:
+        raise RetryableError(str(e))
+
+
+def find_openai_image_response(value):
+    if isinstance(value, dict):
+        data = value.get('data')
+        if isinstance(data, list):
+            return value
+        for key in ('data', 'result', 'response', 'output'):
+            found = find_openai_image_response(value.get(key))
+            if found:
+                return found
+    return None
+
+
+def extract_task_id(value):
+    if not isinstance(value, dict):
+        return None
+    for key in ('task_id', 'taskId', 'id'):
+        task_id = value.get(key)
+        if isinstance(task_id, str) and task_id.strip():
+            return task_id.strip()
+    nested = value.get('data')
+    if isinstance(nested, dict):
+        return extract_task_id(nested)
+    return None
 
 
 def request_macode_image_sync(prompt, aspect_ratio):
@@ -142,6 +247,65 @@ def request_macode_image_sync(prompt, aspect_ratio):
         raise RetryableError(str(e))
 
 
+def request_t8_image_sync(prompt, aspect_ratio):
+    api_key = os.environ.get('T8_API_KEY') or os.environ.get('T8STAR_API_KEY')
+    base_url = normalized_openai_base_url('T8_BASE_URL', 'https://ai.t8star.cn')
+    model = os.environ.get('T8_IMAGE_MODEL', 'gpt-image-2')
+    quality = os.environ.get('T8_IMAGE_QUALITY', 'high').strip()
+    response_format = os.environ.get('T8_IMAGE_RESPONSE_FORMAT', 'url').strip() or 'url'
+    async_mode = os.environ.get('T8_IMAGE_ASYNC', 'true').strip().lower() not in {'0', 'false', 'no'}
+
+    if not api_key:
+        raise FatalError('T8_API_KEY not found. Set it in .env or environment variables.')
+    if not base_url:
+        raise FatalError('T8_BASE_URL not found. Set it in .env or environment variables.')
+
+    body = {
+        'model': model,
+        'prompt': prompt,
+        'size': image_size_for_aspect_ratio(aspect_ratio),
+        'n': 1,
+        'response_format': response_format,
+    }
+    if quality:
+        body['quality'] = quality
+
+    submit_url = f'{base_url}/images/generations'
+    if async_mode:
+        submit_url = f'{submit_url}?async=true'
+
+    result = request_openai_json_sync('POST', submit_url, api_key, body=body, timeout=180)
+    image_response = find_openai_image_response(result)
+    if image_response:
+        return image_response
+
+    task_id = extract_task_id(result)
+    if not task_id:
+        raise RetryableError(f'T8 response did not contain image data or task_id: {json.dumps(result, ensure_ascii=False)}')
+
+    deadline = time.monotonic() + float(os.environ.get('T8_IMAGE_TIMEOUT', T8_MAX_WAIT_S))
+    poll_interval = float(os.environ.get('T8_IMAGE_POLL_INTERVAL', T8_POLL_INTERVAL_S))
+    poll_url = f'{base_url}/images/tasks/{task_id}'
+
+    while time.monotonic() < deadline:
+        poll_result = request_openai_json_sync('GET', poll_url, api_key, timeout=60)
+        image_response = find_openai_image_response(poll_result)
+        status_payload = poll_result.get('data') if isinstance(poll_result, dict) and isinstance(poll_result.get('data'), dict) else poll_result
+        status = str(status_payload.get('status', '') if isinstance(status_payload, dict) else '').upper()
+
+        if status in {'SUCCESS', 'SUCCEEDED', 'COMPLETED', 'DONE'} and image_response:
+            return image_response
+        if status in {'FAILURE', 'FAILED', 'ERROR'}:
+            reason = ''
+            if isinstance(status_payload, dict):
+                reason = status_payload.get('fail_reason') or status_payload.get('error') or status_payload.get('message') or ''
+            raise RetryableError(f'T8 task failed: {reason or json.dumps(poll_result, ensure_ascii=False)}')
+
+        time.sleep(poll_interval)
+
+    raise RetryableError(f'T8 task timed out after waiting for {task_id}.')
+
+
 async def generate_single_macode(prompt, aspect_ratio, output_dir, index, total):
     tag = f'[{index + 1}/{total}] ' if total > 1 else ''
     existing = find_existing_image(output_dir, index, total)
@@ -163,28 +327,48 @@ async def generate_single_macode(prompt, aspect_ratio, output_dir, index, total)
     suffix = f'{str(index + 1).zfill(len(str(total)))}' if total > 1 else '1'
     filepath = str(Path(output_dir) / f'image2_{suffix}_{timestamp}.png')
 
-    b64_json = image_result.get('b64_json')
-    if b64_json:
+    async def _save():
         print(f'{tag}Saving image to {filepath}...')
         temp_path = f'{filepath}.tmp'
-        await asyncio.to_thread(
-            Path(temp_path).write_bytes,
-            base64.b64decode(b64_json)
-        )
+        await asyncio.to_thread(save_image_result, image_result, temp_path)
         await asyncio.to_thread(os.replace, temp_path, filepath)
         print(f'{tag}Image saved: {filepath}')
         return filepath
 
-    image_url = image_result.get('url')
-    if image_url:
-        async def _download():
-            print(f'{tag}Downloading image to {filepath}...')
-            await asyncio.to_thread(download_file, image_url, filepath)
-            print(f'{tag}Image saved: {filepath}')
-            return filepath
-        return await with_retry(_download, max_retries=MAX_RETRIES, context=tag)
+    return await with_retry(_save, max_retries=MAX_RETRIES, context=tag)
 
-    raise RetryableError(f'{tag}Macode response did not contain b64_json or url.')
+
+async def generate_single_t8(prompt, aspect_ratio, output_dir, index, total):
+    tag = f'[{index + 1}/{total}] ' if total > 1 else ''
+    existing = find_existing_image(output_dir, index, total)
+    if existing:
+        print(f'{tag}Reusing existing image: {existing}')
+        return existing
+
+    async def _request():
+        print(f'{tag}Submitting t8 gpt-image-2 request...')
+        return await asyncio.to_thread(request_t8_image_sync, prompt, aspect_ratio)
+
+    result = await with_retry(_request, max_retries=MAX_RETRIES, context=tag)
+    data = result.get('data') or []
+    if not data:
+        raise RetryableError(f'{tag}No image data in t8 response.')
+
+    image_result = data[0]
+    timestamp = int(time.time() * 1000)
+    suffix = f'{str(index + 1).zfill(len(str(total)))}' if total > 1 else '1'
+    filepath = str(Path(output_dir) / f'image2_{suffix}_{timestamp}.png')
+
+    async def _save():
+        print(f'{tag}Saving image to {filepath}...')
+        temp_path = f'{filepath}.tmp'
+        await asyncio.to_thread(save_image_result, image_result, temp_path)
+        await asyncio.to_thread(os.replace, temp_path, filepath)
+        print(f'{tag}Image saved: {filepath}')
+        return filepath
+
+    return await with_retry(_save, max_retries=MAX_RETRIES, context=tag)
+
 
 
 # --- Error classification ---
@@ -338,7 +522,10 @@ def download_file(url, dest_path):
     from urllib.request import urlopen
 
     temp_path = f'{dest_path}.tmp'
-    with urlopen(url) as resp:
+    req = Request(url)
+    req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+    req.add_header('Accept', 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8')
+    with urlopen(req, timeout=180) as resp:
         if resp.status >= 300 and resp.status < 400:
             location = resp.headers.get('Location')
             if location:
@@ -353,7 +540,10 @@ def download_file(url, dest_path):
 
 # --- Generate single image ---
 async def generate_single(prompt, aspect_ratio, output_dir, index, total):
-    if get_image_provider() == 'macode_image2':
+    provider = get_image_provider()
+    if provider == 't8_image2':
+        return await generate_single_t8(prompt, aspect_ratio, output_dir, index, total)
+    if provider == 'macode_image2':
         return await generate_single_macode(prompt, aspect_ratio, output_dir, index, total)
 
     tag = f'[{index + 1}/{total}] ' if total > 1 else ''

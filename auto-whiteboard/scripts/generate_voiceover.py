@@ -48,6 +48,13 @@ def mask_secret(value):
     return f"{value[:8]}...{value[-4:]}"
 
 
+def get_tts_provider(config):
+    provider = config.get("TTS", "provider", fallback="runninghub").strip().lower()
+    if provider in {"fish", "fish_audio", "fishaudio"}:
+        return "fish"
+    return "runninghub"
+
+
 def text_hash(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -58,8 +65,18 @@ def stable_hash(payload):
 
 
 def tts_cache_identity(config, reference_audio, tone):
+    provider = get_tts_provider(config)
+    if provider == "fish":
+        return {
+            "provider": provider,
+            "model": config.get("FishAudio", "model", fallback=os.environ.get("FISH_AUDIO_MODEL", "s2-pro")),
+            "reference_id": config.get("FishAudio", "reference_id", fallback=os.environ.get("FISH_AUDIO_REFERENCE_ID", "")),
+            "latency": config.get("FishAudio", "latency", fallback="normal"),
+            "format": config.get("FishAudio", "format", fallback="mp3"),
+        }
+
     return {
-        "provider": config.get("TTS", "provider", fallback="runninghub"),
+        "provider": provider,
         "voice_id": config.get("TTS", "voice_id", fallback="default"),
         "reference_audio": reference_audio or "",
         "tone": tone or "",
@@ -186,6 +203,47 @@ def get_api_key(config):
     return api_key
 
 
+def load_fish_settings(config):
+    api_key = (
+        os.environ.get("FISH_AUDIO_API_KEY")
+        or os.environ.get("FISH_API_KEY")
+        or config.get("FishAudio", "api_key", fallback="")
+    )
+    reference_id = (
+        os.environ.get("FISH_AUDIO_REFERENCE_ID")
+        or os.environ.get("FISH_REFERENCE_ID")
+        or config.get("FishAudio", "reference_id", fallback="")
+    )
+    if not api_key or api_key == "your_fish_audio_api_key_here":
+        print("[ERROR] Please configure a valid Fish Audio API key.", file=sys.stderr)
+        sys.exit(1)
+    if not reference_id or reference_id == "your_fish_reference_id_here":
+        print("[ERROR] Please configure a valid Fish Audio reference_id.", file=sys.stderr)
+        sys.exit(1)
+
+    base_url = (
+        os.environ.get("FISH_AUDIO_BASE_URL")
+        or config.get("FishAudio", "base_url", fallback="https://api.fish.audio/v1")
+    ).rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1"
+
+    settings = {
+        "provider": "fish",
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": os.environ.get("FISH_AUDIO_MODEL") or config.get("FishAudio", "model", fallback="s2-pro"),
+        "reference_id": reference_id,
+        "format": config.get("FishAudio", "format", fallback="mp3"),
+        "latency": config.get("FishAudio", "latency", fallback="normal"),
+        "timeout": config.getint("FishAudio", "timeout", fallback=180),
+    }
+    print(f"[INFO] Fish Audio API key: {mask_secret(api_key)}")
+    print(f"[INFO] Fish model: {settings['model']}")
+    print(f"[INFO] Fish reference_id: {settings['reference_id']}")
+    return settings
+
+
 def submit_runninghub_tts(text, api_key, reference_audio, tone):
     submit_url = f"https://www.runninghub.cn/openapi/v2/run/ai-app/{RUNNINGHUB_TTS_APP_ID}"
     headers = {
@@ -294,13 +352,55 @@ def generate_tts_runninghub(text, output_path, api_key, reference_audio=None, to
     return duration
 
 
-def generate_one_segment(idx, sentence_text, audio_path, api_key, reference_audio, tone, retries, cache_hash):
+def generate_tts_fish(text, output_path, settings):
+    url = f"{settings['base_url']}/tts"
+    payload = {
+        "text": text,
+        "reference_id": settings["reference_id"],
+        "format": settings["format"],
+        "latency": settings["latency"],
+    }
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {settings['api_key']}",
+        "Content-Type": "application/json; charset=utf-8",
+        "model": settings["model"],
+    }
+
+    response = requests.post(url, headers=headers, data=body, timeout=settings["timeout"])
+    if response.status_code >= 400:
+        error_text = response.text[:800] if response.text else response.reason
+        raise RuntimeError(f"Fish TTS HTTP {response.status_code}: {error_text}")
+
+    temp_path = f"{output_path}.tmp"
+    with open(temp_path, "wb") as handle:
+        handle.write(response.content)
+    if os.path.getsize(temp_path) < 1024:
+        raise RuntimeError("Fish TTS response is too small")
+    os.replace(temp_path, output_path)
+
+    duration = get_audio_duration(output_path)
+    if duration <= 0:
+        raise RuntimeError("Generated Fish audio has zero duration")
+    return duration
+
+
+def generate_one_segment(idx, sentence_text, audio_path, runtime, retries, cache_hash):
     last_error = None
     for attempt in range(1, retries + 1):
         try:
             if os.path.exists(audio_path):
                 os.remove(audio_path)
-            duration = generate_tts_runninghub(sentence_text, audio_path, api_key, reference_audio, tone)
+            if runtime["provider"] == "fish":
+                duration = generate_tts_fish(sentence_text, audio_path, runtime["fish"])
+            else:
+                duration = generate_tts_runninghub(
+                    sentence_text,
+                    audio_path,
+                    runtime["api_key"],
+                    runtime.get("reference_audio"),
+                    runtime.get("tone", "\u81ea\u7136"),
+                )
             return {
                 "index": idx,
                 "audio_path": os.path.abspath(audio_path),
@@ -325,8 +425,24 @@ def normalize_sentence(sentence):
 
 
 def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False):
-    api_key = get_api_key(config)
-    reference_audio, tone = load_voice_settings(config)
+    provider = get_tts_provider(config)
+    reference_audio = None
+    tone = None
+    if provider == "fish":
+        fish_settings = load_fish_settings(config)
+        runtime = {
+            "provider": "fish",
+            "fish": fish_settings,
+        }
+    else:
+        api_key = get_api_key(config)
+        reference_audio, tone = load_voice_settings(config)
+        runtime = {
+            "provider": "runninghub",
+            "api_key": api_key,
+            "reference_audio": reference_audio,
+            "tone": tone,
+        }
     cache_identity = tts_cache_identity(config, reference_audio, tone)
     retries = config.getint("TTS", "retries", fallback=3)
 
@@ -342,11 +458,13 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
         raise RuntimeError("Sentence list is empty after normalization")
 
     print(f"\n[TTS] Generating voiceover for {total} segments")
+    print(f"      provider: {provider}")
     print(f"      concurrency: {concurrency}")
     print(f"      retries: {retries}")
-    if reference_audio:
+    if provider == "runninghub" and reference_audio:
         print(f"      reference audio: {reference_audio}")
-    print(f"      tone: {tone}")
+    if provider == "runninghub":
+        print(f"      tone: {tone}")
 
     results = {}
     pending = []
@@ -383,9 +501,7 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
                     idx,
                     sentence_text,
                     audio_path,
-                    api_key,
-                    reference_audio,
-                    tone,
+                    runtime,
                     retries,
                     expected_cache_hash,
                 ): (idx, sentence_text)
@@ -519,7 +635,9 @@ def main():
 
     pause = args.pause if args.pause is not None else config.getfloat("TextToSRT", "pause", fallback=0.5)
     concurrency = args.concurrency if args.concurrency else config.getint("TTS", "concurrency", fallback=1)
-    concurrency = max(1, min(concurrency, 8))
+    provider = get_tts_provider(config)
+    provider_limit = config.getint("FishAudio", "concurrency", fallback=5) if provider == "fish" else 8
+    concurrency = max(1, min(concurrency, provider_limit))
 
     with open(args.sentences, "r", encoding="utf-8-sig") as handle:
         sentences = json.load(handle)

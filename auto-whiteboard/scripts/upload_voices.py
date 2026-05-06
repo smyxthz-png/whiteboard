@@ -161,7 +161,7 @@ def main():
         sys.exit(1)
 
     config = configparser.ConfigParser()
-    config.read(config_path, encoding='utf-8')
+    config.read(config_path, encoding='utf-8-sig')
 
     # 获取API Key
     api_key = config.get('RunningHubTTS', 'api_key', fallback=None)

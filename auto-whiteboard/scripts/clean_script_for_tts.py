@@ -27,7 +27,7 @@ def load_config(config_path):
         print(f"[ERROR] 配置文件不存在: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    files_read = config.read(config_path, encoding='utf-8')
+    files_read = config.read(config_path, encoding='utf-8-sig')
     if not files_read:
         print(f"[ERROR] 无法读取配置文件: {config_path}", file=sys.stderr)
         sys.exit(1)

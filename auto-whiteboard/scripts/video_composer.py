@@ -19,7 +19,7 @@ import re
 def load_config(config_path):
     """加载配置文件"""
     config = configparser.ConfigParser()
-    config.read(config_path, encoding='utf-8')
+    config.read(config_path, encoding='utf-8-sig')
     return config
 
 

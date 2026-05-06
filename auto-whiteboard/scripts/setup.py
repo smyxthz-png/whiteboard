@@ -81,7 +81,7 @@ def check_config():
     # 读取配置检查 API Key
     import configparser
     config = configparser.ConfigParser()
-    config.read(config_path, encoding='utf-8')
+    config.read(config_path, encoding='utf-8-sig')
 
     warnings = []
 

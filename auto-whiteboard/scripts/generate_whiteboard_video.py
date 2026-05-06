@@ -33,7 +33,7 @@ def load_config(config_path):
         raise FileNotFoundError(f"配置文件不存在: {config_path}")
 
     config = configparser.ConfigParser()
-    files_read = config.read(config_path, encoding='utf-8')
+    files_read = config.read(config_path, encoding='utf-8-sig')
 
     if not files_read:
         raise ValueError(f"配置文件读取失败: {config_path}")

@@ -32,6 +32,34 @@ BATCH_CONCURRENCY = 10
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
+def is_valid_file(path):
+    try:
+        return Path(path).exists() and Path(path).stat().st_size > 1024
+    except OSError:
+        return False
+
+
+def find_existing_image(output_dir, index, total):
+    suffix = str(index + 1).zfill(len(str(total))) if total > 1 else '1'
+    candidates = []
+    patterns = [
+        f'image2_{suffix}_*.png',
+        f'banana2_*_{suffix}.png',
+        f'banana2_*_{suffix}.jpg',
+        f'banana2_*_{suffix}.jpeg',
+    ]
+    if total == 1:
+        patterns.extend(['image2_1_*.png', 'banana2_*.png', 'banana2_*.jpg', 'banana2_*.jpeg'])
+
+    output_path = Path(output_dir)
+    for pattern in patterns:
+        candidates.extend(path for path in output_path.glob(pattern) if is_valid_file(path))
+
+    if not candidates:
+        return None
+    return str(sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)[0])
+
+
 # --- Load .env from skill directory ---
 def load_env():
     env_path = SCRIPT_DIR.parent / '.env'
@@ -116,6 +144,10 @@ def request_macode_image_sync(prompt, aspect_ratio):
 
 async def generate_single_macode(prompt, aspect_ratio, output_dir, index, total):
     tag = f'[{index + 1}/{total}] ' if total > 1 else ''
+    existing = find_existing_image(output_dir, index, total)
+    if existing:
+        print(f'{tag}Reusing existing image: {existing}')
+        return existing
 
     async def _request():
         print(f'{tag}Submitting macode image-2 request...')
@@ -134,10 +166,12 @@ async def generate_single_macode(prompt, aspect_ratio, output_dir, index, total)
     b64_json = image_result.get('b64_json')
     if b64_json:
         print(f'{tag}Saving image to {filepath}...')
+        temp_path = f'{filepath}.tmp'
         await asyncio.to_thread(
-            Path(filepath).write_bytes,
+            Path(temp_path).write_bytes,
             base64.b64decode(b64_json)
         )
+        await asyncio.to_thread(os.replace, temp_path, filepath)
         print(f'{tag}Image saved: {filepath}')
         return filepath
 
@@ -303,6 +337,7 @@ def download_file(url, dest_path):
     import shutil
     from urllib.request import urlopen
 
+    temp_path = f'{dest_path}.tmp'
     with urlopen(url) as resp:
         if resp.status >= 300 and resp.status < 400:
             location = resp.headers.get('Location')
@@ -310,8 +345,9 @@ def download_file(url, dest_path):
                 return download_file(location, dest_path)
         if resp.status != 200:
             raise RuntimeError(f'Download failed with status {resp.status}')
-        with open(dest_path, 'wb') as f:
+        with open(temp_path, 'wb') as f:
             shutil.copyfileobj(resp, f)
+    os.replace(temp_path, dest_path)
     return dest_path
 
 
@@ -321,6 +357,10 @@ async def generate_single(prompt, aspect_ratio, output_dir, index, total):
         return await generate_single_macode(prompt, aspect_ratio, output_dir, index, total)
 
     tag = f'[{index + 1}/{total}] ' if total > 1 else ''
+    existing = find_existing_image(output_dir, index, total)
+    if existing:
+        print(f'{tag}Reusing existing image: {existing}')
+        return existing
 
     submit_retries = 0
     while submit_retries <= POLL_MAX_RETRIES:

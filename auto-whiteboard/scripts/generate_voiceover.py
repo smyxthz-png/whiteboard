@@ -1,483 +1,537 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-TTS 配音生成器（RunningHub API）
-逐句生成配音，并根据实际音频时长生成精确对齐的 SRT 字幕
-"""
+"""Generate per-sentence TTS audio, merge it, and create sync-accurate SRT."""
 
-import os
-import sys
-import io
 import argparse
-import json
 import configparser
-import time
-import requests
+import hashlib
+import io
+import json
+import os
+import shutil
 import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 
-# Force UTF-8 output on Windows
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+import requests
+
+
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+
+
+RUNNINGHUB_TTS_APP_ID = "1966743528380510209"
 
 
 def load_config(config_path):
-    """加载配置文件"""
     config = configparser.ConfigParser()
-
-    # 确保路径存在
     if not os.path.exists(config_path):
-        print(f"[ERROR] 配置文件不存在: {config_path}", file=sys.stderr)
+        print(f"[ERROR] Config file not found: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    # 读取配置
-    files_read = config.read(config_path, encoding='utf-8')
-
+    files_read = config.read(config_path, encoding="utf-8-sig")
     if not files_read:
-        print(f"[ERROR] 无法读取配置文件: {config_path}", file=sys.stderr)
+        print(f"[ERROR] Could not read config file: {config_path}", file=sys.stderr)
         sys.exit(1)
-
-    print(f"[DEBUG] 成功加载配置文件: {config_path}", file=sys.stderr)
-    print(f"[DEBUG] 配置节: {config.sections()}", file=sys.stderr)
 
     return config
 
 
+def mask_secret(value):
+    if not value:
+        return ""
+    if len(value) <= 12:
+        return "<redacted>"
+    return f"{value[:8]}...{value[-4:]}"
+
+
+def text_hash(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def get_audio_duration(audio_path):
-    """获取音频文件时长（秒），使用ffprobe"""
     try:
         result = subprocess.run(
-            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-             '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                audio_path,
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             check=True,
-            timeout=30
+            timeout=30,
         )
         return float(result.stdout.strip())
-    except subprocess.TimeoutExpired:
-        print(f"[ERROR] 获取音频时长超时 (30s): {audio_path}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[WARN] Could not read audio duration for {audio_path}: {exc}", file=sys.stderr)
         return 0.0
-    except Exception as e:
-        print(f"[ERROR] 获取音频时长失败: {e}")
-        return 0.0
+
+
+def is_valid_audio(audio_path, min_duration=0.05):
+    if not os.path.exists(audio_path):
+        return False
+    if os.path.getsize(audio_path) < 1024:
+        return False
+    return get_audio_duration(audio_path) >= min_duration
 
 
 def format_srt_timestamp(seconds):
-    """格式化为 SRT 时间戳格式 HH:MM:SS,mmm"""
+    seconds = max(0.0, seconds)
     td = timedelta(seconds=seconds)
-    hours = int(td.total_seconds() // 3600)
-    minutes = int((td.total_seconds() % 3600) // 60)
-    secs = int(td.total_seconds() % 60)
-    millis = int((td.total_seconds() % 1) * 1000)
+    total = td.total_seconds()
+    hours = int(total // 3600)
+    minutes = int((total % 3600) // 60)
+    secs = int(total % 60)
+    millis = int(round((total - int(total)) * 1000))
+    if millis == 1000:
+        secs += 1
+        millis = 0
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
-def mask_secret(value):
-    """Mask API keys in logs."""
-    if not value:
-        return ''
-    if len(value) <= 12:
-        return '<redacted>'
-    return f"{value[:8]}...{value[-4:]}"
+def read_manifest(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            return data
+    except Exception as exc:
+        print(f"[WARN] Ignoring unreadable TTS manifest: {exc}", file=sys.stderr)
+    return {}
 
 
-def generate_tts_runninghub(text, output_path, api_key, reference_audio=None, tone="自然"):
-    """
-    使用 RunningHub AI 应用生成 TTS 配音
+def write_manifest(path, manifest):
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2)
+    os.replace(temp_path, path)
 
-    参数：
-    - text: 要合成的文本
-    - output_path: 输出音频路径
-    - api_key: RunningHub API Key
-    - reference_audio: 参考音频文件名（可选，用于声音克隆）
-    - tone: 语气（默认"自然"）
-    """
 
-    # RunningHub TTS AI 应用 ID
-    app_id = "1966743528380510209"
+def load_voice_settings(config):
+    voice_library_path = config.get("TTS", "voice_library", fallback="config/voice_library.json")
+    voice_id = config.get("TTS", "voice_id", fallback="default")
 
-    # 提交任务
-    submit_url = f"https://www.runninghub.cn/openapi/v2/run/ai-app/{app_id}"
+    if not os.path.isabs(voice_library_path):
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        voice_library_path = os.path.join(project_root, voice_library_path)
 
+    reference_audio = None
+    tone = "\u81ea\u7136"
+
+    if os.path.exists(voice_library_path):
+        try:
+            with open(voice_library_path, "r", encoding="utf-8") as handle:
+                voice_library = json.load(handle)
+
+            voices = voice_library.get("voices", []) + voice_library.get("custom_voices", [])
+            selected = next((voice for voice in voices if voice.get("id") == voice_id), None)
+            if selected:
+                reference_audio = selected.get("uploaded_file_name") or selected.get("reference_audio") or None
+                tone = selected.get("tone") or tone
+                print(f"[INFO] Voice: {selected.get('name', voice_id)}")
+            else:
+                print(f"[WARN] Voice id '{voice_id}' not found, using default TTS voice", file=sys.stderr)
+        except Exception as exc:
+            print(f"[WARN] Could not load voice library, using default voice: {exc}", file=sys.stderr)
+
+    reference_audio = config.get("TTS", "reference_audio", fallback=reference_audio) or reference_audio
+    tone = config.get("TTS", "tone", fallback=tone) or tone
+    return reference_audio, tone
+
+
+def get_api_key(config):
+    api_key = config.get("RunningHubTTS", "api_key", fallback=None)
+    if not api_key:
+        api_key = config.get("RunningHub", "api_key", fallback="")
+
+    if not api_key or api_key == "your_runninghub_tts_api_key_here" or api_key == "your_runninghub_key_here":
+        print("[ERROR] Please configure a valid RunningHub TTS API key.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[INFO] TTS API key: {mask_secret(api_key)}")
+    return api_key
+
+
+def submit_runninghub_tts(text, api_key, reference_audio, tone):
+    submit_url = f"https://www.runninghub.cn/openapi/v2/run/ai-app/{RUNNINGHUB_TTS_APP_ID}"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
+        "Authorization": f"Bearer {api_key}",
     }
 
-    # 构建请求参数
     node_info_list = [
         {
             "nodeId": "4",
             "fieldName": "prompt",
             "fieldValue": text,
-            "description": "台词"
+            "description": "text",
         },
         {
             "nodeId": "19",
             "fieldName": "text",
             "fieldValue": tone,
-            "description": "语气"
-        }
+            "description": "tone",
+        },
     ]
-
-    # 如果提供了参考音频
     if reference_audio:
-        node_info_list.append({
-            "nodeId": "18",
-            "fieldName": "audio",
-            "fieldValue": reference_audio,
-            "description": "模仿的音频"
-        })
+        node_info_list.append(
+            {
+                "nodeId": "18",
+                "fieldName": "audio",
+                "fieldValue": reference_audio,
+                "description": "reference audio",
+            }
+        )
 
     payload = {
         "nodeInfoList": node_info_list,
         "instanceType": "default",
-        "usePersonalQueue": "false"
+        "usePersonalQueue": "false",
+    }
+    response = requests.post(submit_url, headers=headers, json=payload, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+
+    if data.get("status") not in {"QUEUED", "RUNNING"} or not data.get("taskId"):
+        raise RuntimeError(f"Unexpected submit response: {data}")
+    return data["taskId"]
+
+
+def wait_runninghub_result(task_id, api_key, max_wait_seconds=900, poll_interval=5):
+    query_url = "https://www.runninghub.cn/openapi/v2/query"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
     }
 
-    # 提交任务
-    try:
-        response = requests.post(submit_url, headers=headers, json=payload, timeout=30)
+    deadline = time.monotonic() + max_wait_seconds
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        time.sleep(poll_interval)
+        response = requests.post(query_url, headers=headers, json={"taskId": task_id}, timeout=30)
         response.raise_for_status()
-        result = response.json()
+        data = response.json()
+        status = data.get("status")
 
-        if result.get('status') not in ['QUEUED', 'RUNNING']:
-            print(f"[ERROR] 任务提交失败: {result}", file=sys.stderr)
-            return False
+        if status == "SUCCESS":
+            results = data.get("results") or []
+            audio_url = results[0].get("url") if results else None
+            if not audio_url:
+                raise RuntimeError(f"TTS task succeeded without audio URL: {data}")
+            return audio_url
 
-        task_id = result['taskId']
-        print(f"      任务ID: {task_id}")
+        if status == "FAILED":
+            raise RuntimeError(data.get("errorMessage") or f"TTS task failed: {data}")
 
-    except requests.exceptions.HTTPError as e:
-        print(f"[ERROR] HTTP错误 {e.response.status_code}: {e.response.text}", file=sys.stderr)
-        if e.response.status_code == 401:
-            print(f"[ERROR] API Key 认证失败，请检查 config.ini 中的 [RunningHubTTS] api_key", file=sys.stderr)
-        return False
-    except requests.exceptions.Timeout:
-        print(f"[ERROR] 请求超时，请检查网络连接", file=sys.stderr)
-        return False
-    except requests.exceptions.RequestException as e:
-        print(f"[ERROR] 网络请求失败: {e}", file=sys.stderr)
-        return False
-    except Exception as e:
-        print(f"[ERROR] 提交任务失败: {e}", file=sys.stderr)
-        return False
+        if status not in {"QUEUED", "RUNNING"}:
+            raise RuntimeError(f"Unexpected TTS task status: {data}")
 
-    # 轮询查询结果
-    query_url = "https://www.runninghub.cn/openapi/v2/query"
-    max_retries = 60  # 最多等待 5 分钟
-    retry_interval = 5  # 每 5 秒查询一次
+        if attempt % 6 == 0:
+            print(f"      waiting for task {task_id} ({attempt * poll_interval}s)")
 
-    for i in range(max_retries):
-        time.sleep(retry_interval)
+    raise TimeoutError(f"TTS task timed out after {max_wait_seconds}s: {task_id}")
 
+
+def download_audio(audio_url, output_path):
+    temp_path = f"{output_path}.tmp"
+    with requests.get(audio_url, stream=True, timeout=90) as response:
+        response.raise_for_status()
+        with open(temp_path, "wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 128):
+                if chunk:
+                    handle.write(chunk)
+
+    if os.path.getsize(temp_path) < 1024:
+        raise RuntimeError("Downloaded audio is too small")
+
+    os.replace(temp_path, output_path)
+
+
+def generate_tts_runninghub(text, output_path, api_key, reference_audio=None, tone="\u81ea\u7136"):
+    task_id = submit_runninghub_tts(text, api_key, reference_audio, tone)
+    print(f"      task id: {task_id}")
+    audio_url = wait_runninghub_result(task_id, api_key)
+    download_audio(audio_url, output_path)
+
+    duration = get_audio_duration(output_path)
+    if duration <= 0:
+        raise RuntimeError("Generated audio has zero duration")
+    return duration
+
+
+def generate_one_segment(idx, sentence_text, audio_path, api_key, reference_audio, tone, retries):
+    last_error = None
+    for attempt in range(1, retries + 1):
         try:
-            query_payload = {"taskId": task_id}
-            response = requests.post(query_url, headers=headers, json=query_payload, timeout=30)
-            response.raise_for_status()
-            result = response.json()
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+            duration = generate_tts_runninghub(sentence_text, audio_path, api_key, reference_audio, tone)
+            return {
+                "index": idx,
+                "audio_path": os.path.abspath(audio_path),
+                "duration": duration,
+                "text_hash": text_hash(sentence_text),
+                "text": sentence_text,
+                "reused": False,
+            }
+        except Exception as exc:
+            last_error = exc
+            print(f"[WARN] Segment {idx} attempt {attempt}/{retries} failed: {exc}", file=sys.stderr)
+            time.sleep(min(10, attempt * 2))
 
-            status = result.get('status')
-
-            if status == 'SUCCESS':
-                # 获取音频 URL
-                results = result.get('results', [])
-                if not results:
-                    print(f"[ERROR] 未找到生成结果", file=sys.stderr)
-                    return False
-
-                audio_url = results[0].get('url')
-                if not audio_url:
-                    print(f"[ERROR] 未找到音频 URL", file=sys.stderr)
-                    return False
-
-                # 下载音频
-                print(f"      下载音频...")
-                audio_response = requests.get(audio_url, timeout=60)
-                audio_response.raise_for_status()
-
-                with open(output_path, 'wb') as f:
-                    f.write(audio_response.content)
-
-                return True
-
-            elif status == 'FAILED':
-                error_msg = result.get('errorMessage', '未知错误')
-                print(f"[ERROR] 任务失败: {error_msg}", file=sys.stderr)
-                return False
-
-            elif status in ['QUEUED', 'RUNNING']:
-                print(f"      等待中... ({i+1}/{max_retries})")
-                continue
-
-        except requests.exceptions.RequestException as e:
-            print(f"[WARN]  查询失败 (网络错误): {e}", file=sys.stderr)
-            continue
-        except Exception as e:
-            print(f"[WARN]  查询失败: {e}", file=sys.stderr)
-            continue
-
-    print(f"[ERROR] 任务超时", file=sys.stderr)
-    return False
+    raise RuntimeError(f"Segment {idx} failed after {retries} attempts: {last_error}")
 
 
-def generate_voiceover_and_srt(sentences, config, output_dir, pause=0.5):
-    """
-    逐句生成 TTS 配音，并根据实际时长生成 SRT
+def normalize_sentence(sentence):
+    if isinstance(sentence, dict):
+        return str(sentence.get("text", "")).strip()
+    return str(sentence).strip()
 
-    返回：
-    - voiceover_segments: [(audio_path, duration), ...]
-    - srt_content: SRT 字幕内容
-    - total_duration: 总时长（秒）
-    """
 
-    # 获取 RunningHub TTS API Key（优先使用RunningHubTTS配置，否则使用RunningHub配置）
-    print(f"[DEBUG] Config sections: {config.sections()}", file=sys.stderr)
-    print(f"[DEBUG] Has RunningHubTTS: {config.has_section('RunningHubTTS')}", file=sys.stderr)
+def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False):
+    api_key = get_api_key(config)
+    reference_audio, tone = load_voice_settings(config)
+    retries = config.getint("TTS", "retries", fallback=3)
 
-    api_key = config.get('RunningHubTTS', 'api_key', fallback=None)
-    print(f"[DEBUG] API Key from RunningHubTTS: {mask_secret(api_key)}", file=sys.stderr)
-
-    if not api_key:
-        api_key = config.get('RunningHub', 'api_key', fallback='')
-        print(f"[DEBUG] API Key from RunningHub: {mask_secret(api_key)}", file=sys.stderr)
-
-    if not api_key or api_key == 'your_runninghub_key_here':
-        print("[ERROR] 请在 config.ini 中配置 RunningHub TTS API Key", file=sys.stderr)
-        print("[ERROR] 请在 [RunningHubTTS] 部分设置有效的 api_key", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"[INFO] 使用 TTS API Key: {mask_secret(api_key)}", file=sys.stderr)
-
-    # 加载语音库配置
-    voice_library_path = config.get('TTS', 'voice_library', fallback='config/voice_library.json')
-    voice_id = config.get('TTS', 'voice_id', fallback='default')
-
-    # 如果是相对路径，转为绝对路径
-    if not os.path.isabs(voice_library_path):
-        project_root = os.path.dirname(os.path.dirname(__file__))
-        voice_library_path = os.path.join(project_root, voice_library_path)
-
-    # 尝试从语音库加载配置
-    reference_audio = None
-    tone = '自然'
-
-    if os.path.exists(voice_library_path):
-        try:
-            with open(voice_library_path, 'r', encoding='utf-8') as f:
-                voice_library = json.load(f)
-
-            # 查找匹配的语音配置
-            selected_voice = None
-            for voice in voice_library.get('voices', []) + voice_library.get('custom_voices', []):
-                if voice.get('id') == voice_id:
-                    selected_voice = voice
-                    break
-
-            if selected_voice:
-                # 优先使用已上传的fileName（RunningHub格式）
-                reference_audio = selected_voice.get('uploaded_file_name') or selected_voice.get('reference_audio') or None
-                tone = selected_voice.get('tone', '自然')
-                print(f"[INFO] 使用语音库配置: {selected_voice.get('name')} ({selected_voice.get('description')})", file=sys.stderr)
-                if reference_audio:
-                    if reference_audio.startswith('openapi/') or '.' in reference_audio.split('/')[-1]:
-                        print(f"[INFO] 参考音频: {reference_audio} (已上传到RunningHub)", file=sys.stderr)
-                    else:
-                        print(f"[WARN] 参考音频未上传到RunningHub，请运行: python scripts/upload_voices.py --batch", file=sys.stderr)
-            else:
-                print(f"[WARN] 未找到语音ID '{voice_id}'，使用默认配置", file=sys.stderr)
-        except Exception as e:
-            print(f"[WARN] 加载语音库失败: {e}，使用默认配置", file=sys.stderr)
-
-    # 配置文件中的直接设置会覆盖语音库配置
-    config_reference_audio = config.get('TTS', 'reference_audio', fallback=None)
-    config_tone = config.get('TTS', 'tone', fallback=None)
-
-    if config_reference_audio:
-        reference_audio = config_reference_audio
-    if config_tone:
-        tone = config_tone
-
-    # 创建临时目录
-    temp_dir = os.path.join(output_dir, 'temp_audio')
+    temp_dir = os.path.join(output_dir, "temp_audio")
     os.makedirs(temp_dir, exist_ok=True)
+    manifest_path = os.path.join(temp_dir, "manifest.json")
+    manifest = read_manifest(manifest_path)
 
-    voiceover_segments = []
+    normalized = [normalize_sentence(sentence) for sentence in sentences]
+    normalized = [sentence for sentence in normalized if sentence]
+    total = len(normalized)
+    if not total:
+        raise RuntimeError("Sentence list is empty after normalization")
+
+    print(f"\n[TTS] Generating voiceover for {total} segments")
+    print(f"      concurrency: {concurrency}")
+    print(f"      retries: {retries}")
+    if reference_audio:
+        print(f"      reference audio: {reference_audio}")
+    print(f"      tone: {tone}")
+
+    results = {}
+    pending = []
+
+    for idx, sentence_text in enumerate(normalized, start=1):
+        audio_path = os.path.join(temp_dir, f"segment_{idx:03d}.mp3")
+        key = str(idx)
+        expected_hash = text_hash(sentence_text)
+        manifest_entry = manifest.get(key) if isinstance(manifest.get(key), dict) else {}
+        hash_matches = bool(manifest_entry) and manifest_entry.get("text_hash") == expected_hash
+
+        if not force_tts and hash_matches and is_valid_audio(audio_path):
+            duration = get_audio_duration(audio_path)
+            results[idx] = {
+                "index": idx,
+                "audio_path": os.path.abspath(audio_path),
+                "duration": duration,
+                "text_hash": expected_hash,
+                "text": sentence_text,
+                "reused": True,
+            }
+            print(f"  [{idx}/{total}] reuse {os.path.basename(audio_path)} ({duration:.2f}s)")
+            continue
+
+        pending.append((idx, sentence_text, audio_path))
+
+    if pending:
+        with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
+            futures = {
+                executor.submit(
+                    generate_one_segment,
+                    idx,
+                    sentence_text,
+                    audio_path,
+                    api_key,
+                    reference_audio,
+                    tone,
+                    retries,
+                ): (idx, sentence_text)
+                for idx, sentence_text, audio_path in pending
+            }
+
+            for future in as_completed(futures):
+                idx, sentence_text = futures[future]
+                result = future.result()
+                results[idx] = result
+                print(f"  [{idx}/{total}] generated ({result['duration']:.2f}s): {sentence_text[:36]}")
+                manifest[str(idx)] = {
+                    "text_hash": result["text_hash"],
+                    "text": sentence_text,
+                    "audio_path": result["audio_path"],
+                    "duration": result["duration"],
+                }
+                write_manifest(manifest_path, manifest)
+
+    ordered = []
+    missing = []
+    for idx in range(1, total + 1):
+        result = results.get(idx)
+        if not result or not is_valid_audio(result["audio_path"]):
+            missing.append(idx)
+        else:
+            ordered.append(result)
+
+    if missing:
+        raise RuntimeError(f"Missing or invalid TTS segments: {missing}")
+
+    for result in ordered:
+        manifest[str(result["index"])] = {
+            "text_hash": result["text_hash"],
+            "text": result["text"],
+            "audio_path": result["audio_path"],
+            "duration": result["duration"],
+        }
+    write_manifest(manifest_path, manifest)
+    return ordered
+
+
+def build_srt(segments, pause):
     srt_lines = []
     current_time = 0.0
 
-    print(f"\n[TTS] 开始生成配音（共 {len(sentences)} 句）...")
-    if reference_audio:
-        print(f"   参考音频: {reference_audio}")
-    print(f"   语气: {tone}")
-
-    for idx, sentence in enumerate(sentences, start=1):
-        # 处理字典格式的句子
-        if isinstance(sentence, dict):
-            sentence_text = sentence.get('text', '')
-        else:
-            sentence_text = sentence
-
-        print(f"  [{idx}/{len(sentences)}] {sentence_text[:30]}...")
-
-        # 生成音频文件
-        audio_path = os.path.join(temp_dir, f"segment_{idx:03d}.mp3")
-
-        success = generate_tts_runninghub(sentence_text, audio_path, api_key, reference_audio, tone)
-
-        if not success:
-            print(f"[ERROR] 第 {idx} 句生成失败，跳过", file=sys.stderr)
-            continue
-
-        # 获取实际时长
-        duration = get_audio_duration(audio_path)
-        voiceover_segments.append((audio_path, duration))
-
-        # 生成 SRT 条目
+    for segment in segments:
+        idx = segment["index"]
+        text = segment["text"]
+        duration = segment["duration"]
         start_time = current_time
         end_time = current_time + duration
 
         srt_lines.append(str(idx))
         srt_lines.append(f"{format_srt_timestamp(start_time)} --> {format_srt_timestamp(end_time)}")
-        srt_lines.append(sentence_text)
+        srt_lines.append(text)
         srt_lines.append("")
 
-        print(f"      [OK] 时长: {duration:.2f}s")
-
-        # 更新时间（加上句间停顿）
         current_time = end_time + pause
 
-    srt_content = "\n".join(srt_lines)
-    total_duration = current_time - pause  # 去掉最后一个停顿
-
-    return voiceover_segments, srt_content, total_duration
+    total_duration = max(0.0, current_time - pause)
+    return "\n".join(srt_lines), total_duration
 
 
 def merge_audio_segments(segments, output_path, pause=0.5):
-    """
-    合并音频片段为完整配音（使用 ffmpeg filter_complex，插入真实静音间隔）
+    if not segments:
+        raise RuntimeError("No TTS segments to merge")
 
-    segments: [(audio_path, duration), ...]
-    """
-    print(f"\n[MERGE] 合并音频片段...")
-
-    # 构建 filter_complex 命令：每个音频后添加 adelay 实现停顿
+    print("\n[MERGE] Merging audio segments")
     inputs = []
     filter_parts = []
-
-    for i, (audio_path, duration) in enumerate(segments):
-        inputs.extend(['-i', audio_path])
-
-        if i < len(segments) - 1:
-            # 非最后一个片段：添加静音延迟
-            delay_ms = int(pause * 1000)
+    for i, segment in enumerate(segments):
+        inputs.extend(["-i", segment["audio_path"]])
+        if i < len(segments) - 1 and pause > 0:
             filter_parts.append(f"[{i}:a]apad=pad_dur={pause}[a{i}]")
         else:
-            # 最后一个片段：不添加延迟
             filter_parts.append(f"[{i}:a]acopy[a{i}]")
 
-    # 拼接所有音频
-    concat_inputs = ''.join(f"[a{i}]" for i in range(len(segments)))
+    concat_inputs = "".join(f"[a{i}]" for i in range(len(segments)))
     filter_parts.append(f"{concat_inputs}concat=n={len(segments)}:v=0:a=1[out]")
 
-    filter_complex = ';'.join(filter_parts)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        *inputs,
+        "-filter_complex",
+        ";".join(filter_parts),
+        "-map",
+        "[out]",
+        "-c:a",
+        "pcm_s16le",
+        "-ar",
+        "44100",
+        output_path,
+    ]
 
     try:
-        cmd = ['ffmpeg', '-y'] + inputs + [
-            '-filter_complex', filter_complex,
-            '-map', '[out]',
-            '-c:a', 'pcm_s16le', '-ar', '44100',
-            output_path
-        ]
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Audio merge timed out") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"Audio merge failed: {exc.stderr}") from exc
 
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
-
-        # 计算总时长
-        total_duration = sum(duration + pause for _, duration in segments) - pause
-
-        print(f"   [OK] 合并完成: {output_path}")
-        return total_duration
-    except subprocess.TimeoutExpired:
-        print(f"[ERROR] 音频合并超时 (600s)", file=sys.stderr)
-        raise
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] 合并失败: {e.stderr}", file=sys.stderr)
-        raise
+    duration = get_audio_duration(output_path)
+    print(f"      output: {output_path}")
+    print(f"      duration: {duration:.2f}s")
+    return duration
 
 
 def main():
-    parser = argparse.ArgumentParser(description="TTS 配音生成器（精确时间对齐）")
-    parser.add_argument("--sentences", required=True, help="句子列表 JSON 文件路径")
-    parser.add_argument("--output-dir", required=True, help="输出目录")
-    parser.add_argument("--config", default="../config/config.ini", help="配置文件路径")
-    parser.add_argument("--pause", type=float, help="句间停顿（秒），覆盖配置文件")
-    parser.add_argument("--keep-temp", action="store_true", help="保留临时音频文件")
-
+    parser = argparse.ArgumentParser(description="Generate TTS voiceover and sync SRT")
+    parser.add_argument("--sentences", required=True, help="Sentence JSON path")
+    parser.add_argument("--output-dir", required=True, help="Output directory")
+    parser.add_argument("--config", default="../config/config.ini", help="Config file path")
+    parser.add_argument("--pause", type=float, help="Pause between sentences in seconds")
+    parser.add_argument("--keep-temp", action="store_true", help="Keep temporary segment audio")
+    parser.add_argument("--concurrency", type=int, help="Number of TTS jobs to run in parallel")
+    parser.add_argument("--force-tts", action="store_true", help="Regenerate all TTS segments")
     args = parser.parse_args()
 
-    # 加载配置
     if os.path.isabs(args.config):
         config_path = args.config
     else:
-        # 相对路径基于项目根目录（scripts的父目录）
         project_root = os.path.dirname(os.path.dirname(__file__))
         config_path = os.path.join(project_root, args.config)
-    config = load_config(config_path)
+    config = load_config(os.path.abspath(config_path))
 
-    pause = args.pause if args.pause else config.getfloat('TextToSRT', 'pause', fallback=0.5)
+    pause = args.pause if args.pause is not None else config.getfloat("TextToSRT", "pause", fallback=0.5)
+    concurrency = args.concurrency if args.concurrency else config.getint("TTS", "concurrency", fallback=1)
+    concurrency = max(1, min(concurrency, 8))
 
-    # 读取句子列表
-    with open(args.sentences, 'r', encoding='utf-8') as f:
-        sentences = json.load(f)
+    with open(args.sentences, "r", encoding="utf-8-sig") as handle:
+        sentences = json.load(handle)
 
-    if not sentences:
-        print("[ERROR] 句子列表为空", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"[INFO] 读取句子: {len(sentences)} 句")
-
-    # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # 生成配音和 SRT
-    segments, srt_content, total_duration = generate_voiceover_and_srt(
-        sentences, config, args.output_dir, pause
-    )
+    try:
+        segments = prepare_segments(sentences, config, args.output_dir, concurrency, args.force_tts)
+        srt_content, expected_duration = build_srt(segments, pause)
 
-    # 保存 SRT
-    srt_path = os.path.join(args.output_dir, "subtitles.srt")
-    with open(srt_path, 'w', encoding='utf-8') as f:
-        f.write(srt_content)
-    print(f"\n[SUCCESS] SRT 字幕生成: {srt_path}")
+        srt_path = os.path.join(args.output_dir, "subtitles.srt")
+        with open(srt_path, "w", encoding="utf-8") as handle:
+            handle.write(srt_content)
 
-    # 合并音频
-    voiceover_path = os.path.join(args.output_dir, "voiceover.wav")
-    merge_audio_segments(segments, voiceover_path, pause)
+        voiceover_path = os.path.join(args.output_dir, "voiceover.wav")
+        merged_duration = merge_audio_segments(segments, voiceover_path, pause)
+        if abs(merged_duration - expected_duration) > 0.15:
+            print(
+                f"[WARN] Merged audio duration differs from SRT timeline: "
+                f"audio={merged_duration:.2f}s srt={expected_duration:.2f}s",
+                file=sys.stderr,
+            )
 
-    # 清理临时文件
-    if not args.keep_temp:
-        import shutil
-        temp_dir = os.path.join(args.output_dir, 'temp_audio')
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-            print("[CLEANUP] 临时文件已清理")
+        if not args.keep_temp:
+            temp_dir = os.path.join(args.output_dir, "temp_audio")
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                print("[CLEANUP] Removed temporary segment audio")
 
-    print(f"\n[SUCCESS] 配音生成完成!")
-    print(f"[OUTPUT] 配音文件: {voiceover_path}")
-    print(f"[OUTPUT] 字幕文件: {srt_path}")
-    print(f"[INFO] 总时长: {total_duration:.2f} 秒")
-
-    # 输出 JSON 结果
-    result = {
-        "voiceover_path": os.path.abspath(voiceover_path),
-        "srt_path": os.path.abspath(srt_path),
-        "total_duration": total_duration,
-        "segment_count": len(segments)
-    }
-    print(f"\nRESULT_JSON={json.dumps(result, ensure_ascii=False)}")
+        result = {
+            "voiceover_path": os.path.abspath(voiceover_path),
+            "srt_path": os.path.abspath(srt_path),
+            "total_duration": merged_duration,
+            "segment_count": len(segments),
+        }
+        print("\n[SUCCESS] Voiceover and subtitles generated")
+        print(f"[OUTPUT] voiceover: {voiceover_path}")
+        print(f"[OUTPUT] subtitles: {srt_path}")
+        print(f"[INFO] duration: {merged_duration:.2f}s")
+        print(f"\nRESULT_JSON={json.dumps(result, ensure_ascii=False)}")
+    except Exception as exc:
+        print(f"[ERROR] Voiceover generation failed: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

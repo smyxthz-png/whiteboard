@@ -152,10 +152,24 @@ def read_manifest(path):
 
 
 def write_manifest(path, manifest):
-    temp_path = f"{path}.tmp"
+    temp_path = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
     with open(temp_path, "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
-    os.replace(temp_path, path)
+
+    last_exc = None
+    for attempt in range(6):
+        try:
+            os.replace(temp_path, path)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            time.sleep(0.1 * (attempt + 1))
+
+    try:
+        os.remove(temp_path)
+    except OSError:
+        pass
+    raise last_exc
 
 
 def load_voice_settings(config):

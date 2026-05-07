@@ -27,7 +27,7 @@ RUNNINGHUB_TTS_APP_ID = "1966743528380510209"
 
 
 def load_config(config_path):
-    config = configparser.ConfigParser()
+    config = configparser.ConfigParser(interpolation=None)
     if not os.path.exists(config_path):
         print(f"[ERROR] Config file not found: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -49,10 +49,46 @@ def mask_secret(value):
 
 
 def get_tts_provider(config):
-    provider = config.get("TTS", "provider", fallback="runninghub").strip().lower()
+    provider = (os.environ.get("TTS_PROVIDER") or config.get("TTS", "provider", fallback="runninghub")).strip().lower()
     if provider in {"fish", "fish_audio", "fishaudio"}:
         return "fish"
+    if provider in {"302", "302ai", "index_tts2", "index-tts2", "302_index_tts2", "302-index-tts2"}:
+        return "index_tts2"
     return "runninghub"
+
+
+def config_env(config, section, option, env_names, fallback=""):
+    for env_name in env_names:
+        value = os.environ.get(env_name)
+        if value:
+            return value
+    return config.get(section, option, fallback=fallback)
+
+
+def parse_bool(value, fallback=False):
+    if value is None or value == "":
+        return fallback
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def parse_optional_float(value):
+    if value is None or str(value).strip() == "":
+        return None
+    return float(value)
+
+
+def parse_emotion_vector(value):
+    if not value:
+        return None
+    if isinstance(value, list):
+        vector = [float(item) for item in value]
+    else:
+        vector = [float(item.strip()) for item in str(value).replace("，", ",").split(",") if item.strip()]
+    if len(vector) != 8:
+        raise ValueError("IndexTTS2 emotion_vector must contain exactly 8 numbers")
+    return vector
 
 
 def text_hash(text):
@@ -73,6 +109,17 @@ def tts_cache_identity(config, reference_audio, tone):
             "reference_id": config.get("FishAudio", "reference_id", fallback=os.environ.get("FISH_AUDIO_REFERENCE_ID", "")),
             "latency": config.get("FishAudio", "latency", fallback="normal"),
             "format": config.get("FishAudio", "format", fallback="mp3"),
+        }
+    if provider == "index_tts2":
+        return {
+            "provider": provider,
+            "base_url": config_env(config, "IndexTTS2", "base_url", ["INDEX_TTS2_BASE_URL", "AI302_BASE_URL"], "https://api.302.ai").rstrip("/"),
+            "speaker_audio_url": config_env(config, "IndexTTS2", "speaker_audio_url", ["INDEX_TTS2_SPEAKER_AUDIO_URL", "AI302_SPEAKER_AUDIO_URL"], ""),
+            "emotion_audio_url": config_env(config, "IndexTTS2", "emotion_audio_url", ["INDEX_TTS2_EMOTION_AUDIO_URL", "AI302_EMOTION_AUDIO_URL"], ""),
+            "emotion_alpha": config_env(config, "IndexTTS2", "emotion_alpha", ["INDEX_TTS2_EMOTION_ALPHA"], ""),
+            "emotion_vector": config_env(config, "IndexTTS2", "emotion_vector", ["INDEX_TTS2_EMOTION_VECTOR"], ""),
+            "use_emotion_text": config_env(config, "IndexTTS2", "use_emotion_text", ["INDEX_TTS2_USE_EMOTION_TEXT"], ""),
+            "emotion_text": config_env(config, "IndexTTS2", "emotion_text", ["INDEX_TTS2_EMOTION_TEXT"], ""),
         }
 
     return {
@@ -258,6 +305,74 @@ def load_fish_settings(config):
     return settings
 
 
+def load_index_tts2_settings(config):
+    api_key = config_env(
+        config,
+        "IndexTTS2",
+        "api_key",
+        ["INDEX_TTS2_API_KEY", "AI302_API_KEY", "TTS_302_API_KEY"],
+        "",
+    )
+    speaker_audio_url = config_env(
+        config,
+        "IndexTTS2",
+        "speaker_audio_url",
+        ["INDEX_TTS2_SPEAKER_AUDIO_URL", "AI302_SPEAKER_AUDIO_URL"],
+        "",
+    )
+    if not api_key or api_key == "your_302_api_key_here":
+        print("[ERROR] Please configure a valid 302.ai IndexTTS2 API key.", file=sys.stderr)
+        sys.exit(1)
+    if not speaker_audio_url or speaker_audio_url == "your_speaker_audio_url_here":
+        print("[ERROR] Please configure IndexTTS2 speaker_audio_url.", file=sys.stderr)
+        sys.exit(1)
+
+    base_url = config_env(
+        config,
+        "IndexTTS2",
+        "base_url",
+        ["INDEX_TTS2_BASE_URL", "AI302_BASE_URL"],
+        "https://api.302.ai",
+    ).rstrip("/")
+    emotion_vector = parse_emotion_vector(
+        config_env(config, "IndexTTS2", "emotion_vector", ["INDEX_TTS2_EMOTION_VECTOR"], "")
+    )
+    settings = {
+        "provider": "index_tts2",
+        "api_key": api_key,
+        "base_url": base_url,
+        "speaker_audio_url": speaker_audio_url,
+        "emotion_audio_url": config_env(
+            config,
+            "IndexTTS2",
+            "emotion_audio_url",
+            ["INDEX_TTS2_EMOTION_AUDIO_URL", "AI302_EMOTION_AUDIO_URL"],
+            "",
+        ),
+        "emotion_alpha": parse_optional_float(
+            config_env(config, "IndexTTS2", "emotion_alpha", ["INDEX_TTS2_EMOTION_ALPHA"], "")
+        ),
+        "emotion_vector": emotion_vector,
+        "use_emotion_text": parse_bool(
+            config_env(config, "IndexTTS2", "use_emotion_text", ["INDEX_TTS2_USE_EMOTION_TEXT"], "false")
+        ),
+        "emotion_text": config_env(
+            config,
+            "IndexTTS2",
+            "emotion_text",
+            ["INDEX_TTS2_EMOTION_TEXT"],
+            "",
+        ),
+        "timeout": config.getint("IndexTTS2", "timeout", fallback=60),
+        "poll_interval": config.getfloat("IndexTTS2", "poll_interval", fallback=2.0),
+        "max_wait_seconds": config.getint("IndexTTS2", "max_wait_seconds", fallback=900),
+    }
+    print(f"[INFO] 302.ai IndexTTS2 API key: {mask_secret(api_key)}")
+    print(f"[INFO] IndexTTS2 base_url: {base_url}")
+    print(f"[INFO] IndexTTS2 speaker_audio_url: {speaker_audio_url}")
+    return settings
+
+
 def submit_runninghub_tts(text, api_key, reference_audio, tone):
     submit_url = f"https://www.runninghub.cn/openapi/v2/run/ai-app/{RUNNINGHUB_TTS_APP_ID}"
     headers = {
@@ -399,6 +514,88 @@ def generate_tts_fish(text, output_path, settings):
     return duration
 
 
+def submit_index_tts2_task(text, settings):
+    if len(text) > 2048:
+        raise ValueError("IndexTTS2 text must be 2048 characters or fewer")
+    payload = {
+        "text": text,
+        "speaker_audio_url": settings["speaker_audio_url"],
+    }
+    if settings["emotion_audio_url"]:
+        payload["emotion_audio_url"] = settings["emotion_audio_url"]
+    if settings["emotion_alpha"] is not None:
+        payload["emotion_alpha"] = settings["emotion_alpha"]
+    if settings["emotion_vector"] is not None:
+        payload["emotion_vector"] = settings["emotion_vector"]
+    if settings["use_emotion_text"]:
+        payload["use_emotion_text"] = True
+        if settings["emotion_text"]:
+            payload["emotion_text"] = settings["emotion_text"]
+
+    url = f"{settings['base_url']}/302/index_tts2/task"
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {settings['api_key']}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        data=body,
+        timeout=settings["timeout"],
+    )
+    if response.status_code >= 400:
+        error_text = response.text[:800] if response.text else response.reason
+        raise RuntimeError(f"IndexTTS2 submit HTTP {response.status_code}: {error_text}")
+    data = response.json()
+    task_id = data.get("task_id") or data.get("taskId")
+    if not task_id:
+        raise RuntimeError(f"IndexTTS2 submit response did not contain task_id: {data}")
+    return task_id
+
+
+def wait_index_tts2_result(task_id, settings):
+    url = f"{settings['base_url']}/302/index_tts2/task"
+    deadline = time.monotonic() + settings["max_wait_seconds"]
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        time.sleep(settings["poll_interval"])
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {settings['api_key']}"},
+            params={"task_id": task_id},
+            timeout=settings["timeout"],
+        )
+        if response.status_code >= 400:
+            error_text = response.text[:800] if response.text else response.reason
+            raise RuntimeError(f"IndexTTS2 query HTTP {response.status_code}: {error_text}")
+        data = response.json()
+        state = str(data.get("state") or data.get("status") or "").upper()
+        if state in {"SUCCESS", "SUCCEEDED", "COMPLETED"}:
+            audio_url = data.get("audio_url") or data.get("url")
+            if not audio_url:
+                raise RuntimeError(f"IndexTTS2 task succeeded without audio_url: {data}")
+            return audio_url
+        if state in {"FAILURE", "FAILED", "ERROR"}:
+            raise RuntimeError(f"IndexTTS2 task failed: {data}")
+        if attempt % max(1, int(30 / settings["poll_interval"])) == 0:
+            print(f"      waiting for IndexTTS2 task {task_id} ({attempt * settings['poll_interval']:.0f}s)")
+
+    raise TimeoutError(f"IndexTTS2 task timed out after {settings['max_wait_seconds']}s: {task_id}")
+
+
+def generate_tts_index_tts2(text, output_path, settings):
+    task_id = submit_index_tts2_task(text, settings)
+    print(f"      task id: {task_id}")
+    audio_url = wait_index_tts2_result(task_id, settings)
+    download_audio(audio_url, output_path)
+
+    duration = get_audio_duration(output_path)
+    if duration <= 0:
+        raise RuntimeError("Generated IndexTTS2 audio has zero duration")
+    return duration
+
+
 def generate_one_segment(idx, sentence_text, audio_path, runtime, retries, cache_hash):
     last_error = None
     for attempt in range(1, retries + 1):
@@ -407,6 +604,8 @@ def generate_one_segment(idx, sentence_text, audio_path, runtime, retries, cache
                 os.remove(audio_path)
             if runtime["provider"] == "fish":
                 duration = generate_tts_fish(sentence_text, audio_path, runtime["fish"])
+            elif runtime["provider"] == "index_tts2":
+                duration = generate_tts_index_tts2(sentence_text, audio_path, runtime["index_tts2"])
             else:
                 duration = generate_tts_runninghub(
                     sentence_text,
@@ -448,6 +647,12 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
             "provider": "fish",
             "fish": fish_settings,
         }
+    elif provider == "index_tts2":
+        index_tts2_settings = load_index_tts2_settings(config)
+        runtime = {
+            "provider": "index_tts2",
+            "index_tts2": index_tts2_settings,
+        }
     else:
         api_key = get_api_key(config)
         reference_audio, tone = load_voice_settings(config)
@@ -482,9 +687,10 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
 
     results = {}
     pending = []
+    segment_extension = ".wav" if provider == "index_tts2" else ".mp3"
 
     for idx, sentence_text in enumerate(normalized, start=1):
-        audio_path = os.path.join(temp_dir, f"segment_{idx:03d}.mp3")
+        audio_path = os.path.join(temp_dir, f"segment_{idx:03d}{segment_extension}")
         key = str(idx)
         expected_text_hash = text_hash(sentence_text)
         expected_cache_hash = segment_cache_hash(sentence_text, cache_identity)
@@ -650,7 +856,12 @@ def main():
     pause = args.pause if args.pause is not None else config.getfloat("TextToSRT", "pause", fallback=0.5)
     concurrency = args.concurrency if args.concurrency else config.getint("TTS", "concurrency", fallback=1)
     provider = get_tts_provider(config)
-    provider_limit = config.getint("FishAudio", "concurrency", fallback=5) if provider == "fish" else 8
+    if provider == "fish":
+        provider_limit = config.getint("FishAudio", "concurrency", fallback=5)
+    elif provider == "index_tts2":
+        provider_limit = config.getint("IndexTTS2", "concurrency", fallback=5)
+    else:
+        provider_limit = 8
     concurrency = max(1, min(concurrency, provider_limit))
 
     with open(args.sentences, "r", encoding="utf-8-sig") as handle:

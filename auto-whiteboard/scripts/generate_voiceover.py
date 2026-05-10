@@ -17,6 +17,12 @@ from datetime import timedelta
 
 import requests
 
+try:
+    from clean_script_for_tts import clean_sentences as clean_tts_sentences
+except Exception as exc:  # pragma: no cover - cleanup can still be skipped
+    clean_tts_sentences = None
+    CLEAN_TTS_IMPORT_ERROR = exc
+
 
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
@@ -91,6 +97,10 @@ def parse_emotion_vector(value):
     return vector
 
 
+def should_clean_tts_text(config):
+    return parse_bool(config.get("TTS", "clean_for_tts", fallback="true"), True)
+
+
 def text_hash(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -98,6 +108,80 @@ def text_hash(text):
 def stable_hash(payload):
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def normalize_sentence_record(sentence):
+    if isinstance(sentence, dict):
+        original_text = str(
+            sentence.get("original_text")
+            or sentence.get("subtitle_text")
+            or sentence.get("text")
+            or ""
+        ).strip()
+        subtitle_text = str(
+            sentence.get("subtitle_text")
+            or sentence.get("text")
+            or original_text
+        ).strip()
+        if "tts_text" in sentence:
+            tts_text = str(sentence.get("tts_text") or "").strip()
+        else:
+            tts_text = str(
+                sentence.get("cleaned_text")
+                or sentence.get("text")
+                or original_text
+            ).strip()
+        record = sentence.copy()
+    else:
+        original_text = str(sentence or "").strip()
+        subtitle_text = original_text
+        tts_text = original_text
+        record = {}
+
+    if not original_text and not subtitle_text and not tts_text:
+        return None
+    if not tts_text:
+        return None
+
+    record["text"] = original_text or tts_text
+    record["original_text"] = original_text or tts_text
+    record["subtitle_text"] = subtitle_text or original_text or tts_text
+    record["tts_text"] = tts_text
+    return record
+
+
+def normalize_sentence_records(sentences):
+    records = []
+    for sentence in sentences:
+        record = normalize_sentence_record(sentence)
+        if record:
+            records.append(record)
+    return records
+
+
+def prepare_tts_sentence_records(sentences, config, output_dir=None, skip_clean=False):
+    records = normalize_sentence_records(sentences)
+    if not records:
+        raise RuntimeError("Sentence list is empty after normalization")
+
+    if skip_clean or not should_clean_tts_text(config):
+        print("[CLEAN] TTS cleanup disabled; using original text", file=sys.stderr)
+        return records
+
+    if clean_tts_sentences is None:
+        print(
+            f"[WARN] TTS cleanup module unavailable ({CLEAN_TTS_IMPORT_ERROR}); using original text",
+            file=sys.stderr,
+        )
+        return records
+
+    cleaned_records = clean_tts_sentences(records, config)
+    if output_dir:
+        cleaned_path = os.path.join(output_dir, "tts_sentences.json")
+        with open(cleaned_path, "w", encoding="utf-8") as handle:
+            json.dump(cleaned_records, handle, ensure_ascii=False, indent=2)
+        print(f"[CLEAN] Saved cleaned sentence records: {cleaned_path}")
+    return cleaned_records
 
 
 def tts_cache_identity(config, reference_audio, tone):
@@ -596,19 +680,21 @@ def generate_tts_index_tts2(text, output_path, settings):
     return duration
 
 
-def generate_one_segment(idx, sentence_text, audio_path, runtime, retries, cache_hash):
+def generate_one_segment(idx, segment_record, audio_path, runtime, retries, cache_hash):
+    tts_text = segment_record["tts_text"]
+    subtitle_text = segment_record["subtitle_text"]
     last_error = None
     for attempt in range(1, retries + 1):
         try:
             if os.path.exists(audio_path):
                 os.remove(audio_path)
             if runtime["provider"] == "fish":
-                duration = generate_tts_fish(sentence_text, audio_path, runtime["fish"])
+                duration = generate_tts_fish(tts_text, audio_path, runtime["fish"])
             elif runtime["provider"] == "index_tts2":
-                duration = generate_tts_index_tts2(sentence_text, audio_path, runtime["index_tts2"])
+                duration = generate_tts_index_tts2(tts_text, audio_path, runtime["index_tts2"])
             else:
                 duration = generate_tts_runninghub(
-                    sentence_text,
+                    tts_text,
                     audio_path,
                     runtime["api_key"],
                     runtime.get("reference_audio"),
@@ -618,9 +704,11 @@ def generate_one_segment(idx, sentence_text, audio_path, runtime, retries, cache
                 "index": idx,
                 "audio_path": os.path.abspath(audio_path),
                 "duration": duration,
-                "text_hash": text_hash(sentence_text),
+                "text_hash": text_hash(tts_text),
                 "cache_hash": cache_hash,
-                "text": sentence_text,
+                "text": subtitle_text,
+                "subtitle_text": subtitle_text,
+                "tts_text": tts_text,
                 "reused": False,
             }
         except Exception as exc:
@@ -629,12 +717,6 @@ def generate_one_segment(idx, sentence_text, audio_path, runtime, retries, cache
             time.sleep(min(10, attempt * 2))
 
     raise RuntimeError(f"Segment {idx} failed after {retries} attempts: {last_error}")
-
-
-def normalize_sentence(sentence):
-    if isinstance(sentence, dict):
-        return str(sentence.get("text", "")).strip()
-    return str(sentence).strip()
 
 
 def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False):
@@ -670,9 +752,8 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
     manifest_path = os.path.join(temp_dir, "manifest.json")
     manifest = read_manifest(manifest_path)
 
-    normalized = [normalize_sentence(sentence) for sentence in sentences]
-    normalized = [sentence for sentence in normalized if sentence]
-    total = len(normalized)
+    segments = normalize_sentence_records(sentences)
+    total = len(segments)
     if not total:
         raise RuntimeError("Sentence list is empty after normalization")
 
@@ -689,11 +770,13 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
     pending = []
     segment_extension = ".wav" if provider == "index_tts2" else ".mp3"
 
-    for idx, sentence_text in enumerate(normalized, start=1):
+    for idx, segment_record in enumerate(segments, start=1):
+        subtitle_text = segment_record["subtitle_text"]
+        tts_text = segment_record["tts_text"]
         audio_path = os.path.join(temp_dir, f"segment_{idx:03d}{segment_extension}")
         key = str(idx)
-        expected_text_hash = text_hash(sentence_text)
-        expected_cache_hash = segment_cache_hash(sentence_text, cache_identity)
+        expected_text_hash = text_hash(tts_text)
+        expected_cache_hash = segment_cache_hash(tts_text, cache_identity)
         manifest_entry = manifest.get(key) if isinstance(manifest.get(key), dict) else {}
         hash_matches = bool(manifest_entry) and manifest_entry.get("cache_hash") == expected_cache_hash
 
@@ -705,13 +788,15 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
                 "duration": duration,
                 "text_hash": expected_text_hash,
                 "cache_hash": expected_cache_hash,
-                "text": sentence_text,
+                "text": subtitle_text,
+                "subtitle_text": subtitle_text,
+                "tts_text": tts_text,
                 "reused": True,
             }
             print(f"  [{idx}/{total}] reuse {os.path.basename(audio_path)} ({duration:.2f}s)")
             continue
 
-        pending.append((idx, sentence_text, audio_path, expected_cache_hash))
+        pending.append((idx, segment_record, audio_path, expected_cache_hash))
 
     if pending:
         with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
@@ -719,25 +804,27 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
                 executor.submit(
                     generate_one_segment,
                     idx,
-                    sentence_text,
+                    segment_record,
                     audio_path,
                     runtime,
                     retries,
                     expected_cache_hash,
-                ): (idx, sentence_text)
-                for idx, sentence_text, audio_path, expected_cache_hash in pending
+                ): (idx, segment_record)
+                for idx, segment_record, audio_path, expected_cache_hash in pending
             }
 
             for future in as_completed(futures):
-                idx, sentence_text = futures[future]
+                idx, segment_record = futures[future]
                 result = future.result()
                 results[idx] = result
-                print(f"  [{idx}/{total}] generated ({result['duration']:.2f}s): {sentence_text[:36]}")
+                print(f"  [{idx}/{total}] generated ({result['duration']:.2f}s): {result['text'][:36]}")
                 manifest[str(idx)] = {
                     "text_hash": result["text_hash"],
                     "cache_hash": result["cache_hash"],
                     "tts_identity": cache_identity,
-                    "text": sentence_text,
+                    "text": result["text"],
+                    "subtitle_text": result["subtitle_text"],
+                    "tts_text": result["tts_text"],
                     "audio_path": result["audio_path"],
                     "duration": result["duration"],
                 }
@@ -761,6 +848,8 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
             "cache_hash": result["cache_hash"],
             "tts_identity": cache_identity,
             "text": result["text"],
+            "subtitle_text": result["subtitle_text"],
+            "tts_text": result["tts_text"],
             "audio_path": result["audio_path"],
             "duration": result["duration"],
         }
@@ -774,7 +863,7 @@ def build_srt(segments, pause):
 
     for segment in segments:
         idx = segment["index"]
-        text = segment["text"]
+        text = segment.get("subtitle_text") or segment.get("text", "")
         duration = segment["duration"]
         start_time = current_time
         end_time = current_time + duration
@@ -844,6 +933,7 @@ def main():
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary segment audio")
     parser.add_argument("--concurrency", type=int, help="Number of TTS jobs to run in parallel")
     parser.add_argument("--force-tts", action="store_true", help="Regenerate all TTS segments")
+    parser.add_argument("--skip-clean", action="store_true", help="Disable TTS text cleanup")
     args = parser.parse_args()
 
     if os.path.isabs(args.config):
@@ -870,7 +960,16 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     try:
-        segments = prepare_segments(sentences, config, args.output_dir, concurrency, args.force_tts)
+        if args.skip_clean:
+            sentences_for_tts = normalize_sentence_records(sentences)
+        else:
+            sentences_for_tts = prepare_tts_sentence_records(
+                sentences,
+                config,
+                args.output_dir,
+                skip_clean=False,
+            )
+        segments = prepare_segments(sentences_for_tts, config, args.output_dir, concurrency, args.force_tts)
         srt_content, expected_duration = build_srt(segments, pause)
 
         srt_path = os.path.join(args.output_dir, "subtitles.srt")
@@ -897,6 +996,9 @@ def main():
             "srt_path": os.path.abspath(srt_path),
             "total_duration": merged_duration,
             "segment_count": len(segments),
+            "tts_sentences_path": os.path.abspath(os.path.join(args.output_dir, "tts_sentences.json"))
+            if os.path.exists(os.path.join(args.output_dir, "tts_sentences.json"))
+            else None,
         }
         print("\n[SUCCESS] Voiceover and subtitles generated")
         print(f"[OUTPUT] voiceover: {voiceover_path}")

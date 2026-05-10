@@ -14,6 +14,7 @@ Usage:
 """
 
 import json
+import re
 import sys
 import unicodedata
 from datetime import datetime
@@ -49,6 +50,66 @@ def join_scene_text(text_parts: list[str]) -> str:
     return "".join(pieces)
 
 
+def ordered_unique(items: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for item in items:
+        cleaned = item.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
+
+
+def marker_note_candidates(text: str, max_notes: int = 4) -> list[str]:
+    """Extract short, safe marker-note candidates from narration context."""
+    candidates = []
+    important_terms = [
+        "复利",
+        "曼哈顿",
+        "通货膨胀",
+        "费率",
+        "消费贷",
+        "指数基金",
+        "宽基指数",
+        "资产",
+        "债务",
+        "时间",
+        "曲棍球杆",
+    ]
+
+    for term in important_terms:
+        if term in text:
+            candidates.append(term)
+
+    patterns = [
+        r"\d+(?:\.\d+)?%",
+        r"\d+(?:\.\d+)?\s*(?:美元|亿美元|万|块|元)",
+        r"\d+(?:\.\d+)?\s*年",
+        r"第\d+年",
+        r"\d+(?:\.\d+)?\s*%费率",
+        r"日息万分之五",
+    ]
+    for pattern in patterns:
+        candidates.extend(re.findall(pattern, text))
+
+    short_notes = []
+    for candidate in ordered_unique(candidates):
+        note = re.sub(r"\s+", "", candidate)
+        if 1 <= len(note) <= 10:
+            short_notes.append(note)
+
+    return short_notes[:max_notes]
+
+
+def compact_context(text: str, max_chars: int = 220) -> str:
+    text = re.sub(r"\s+", "", text.strip())
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}..."
+
+
 def init_dirs(output_dir: str):
     """Create storyboard, image, video subdirectories under output_dir."""
     import shutil
@@ -81,10 +142,16 @@ def gen_prompts(storyboard_path: str):
         full_text = join_scene_text(text_parts)
         # Append visualHint
         visual_hint = ensure_ending(scene.get("visualHint", ""), "")
-        if visual_hint:
-            content = f'\n"{full_text}"\n\n\n"{visual_hint}"'
-        else:
-            content = f'\n"{full_text}"'
+        notes = marker_note_candidates(f"{full_text} {visual_hint}")
+        note_text = "、".join(notes) if notes else "none"
+        content = (
+            "\nScene narration context only. Do not render this context as visible text:\n"
+            f"{compact_context(full_text)}\n\n"
+            "Visual idea:\n"
+            f"{visual_hint or compact_context(full_text)}\n\n"
+            "Optional short marker notes allowed in the illustration. Use at most 3, and omit any note that is hard to render clearly:\n"
+            f"{note_text}\n"
+        )
         prompt = content
         prompts.append(prompt)
     print(json.dumps(prompts, ensure_ascii=False))

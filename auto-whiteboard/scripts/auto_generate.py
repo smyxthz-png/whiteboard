@@ -14,6 +14,9 @@ from datetime import datetime
 from pathlib import Path
 
 
+WORKFLOW_VERSION = "2026-05-07-tts-clean-v4"
+
+
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
@@ -215,6 +218,7 @@ def main():
     os.makedirs(project_dir, exist_ok=True)
     state = load_run_state(project_dir)
     fingerprint = {
+        "workflow_version": WORKFLOW_VERSION,
         "input_path": os.path.abspath(args.input),
         "input_sha256": sha256_file(args.input),
         "config_path": config_path,

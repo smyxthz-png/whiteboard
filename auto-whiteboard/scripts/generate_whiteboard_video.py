@@ -47,6 +47,14 @@ def stable_hash(payload):
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
 
+def file_hash(path):
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return ''
+
+
 def read_json_file(path, default=None):
     try:
         with open(path, 'r', encoding='utf-8-sig') as f:
@@ -85,6 +93,7 @@ def read_env_values(env_path):
 
 def image_generation_identity(skill_dir):
     env_values = read_env_values(os.path.join(skill_dir, '.env'))
+    prompt_template_path = os.path.join(skill_dir, 'scripts', 'banana_prompt_template.py')
     provider = (
         os.environ.get('IMAGE_PROVIDER')
         or env_values.get('IMAGE_PROVIDER')
@@ -119,6 +128,7 @@ def image_generation_identity(skill_dir):
         'model': model,
         'size': size,
         'quality': quality,
+        'prompt_template_hash': file_hash(prompt_template_path),
     }
 
 
@@ -644,34 +654,14 @@ def generate_audio(srt_path, output_dir, config_path, python_path):
 
     print(f"[INFO] 提取句子: {len(sentences)} 句")
 
-    # 步骤1: 清洗文案（移除Markdown符号和特殊字符）
     raw_sentences_json = os.path.join(output_dir, 'sentences_raw.json')
-    cleaned_sentences_json = os.path.join(output_dir, 'sentences_cleaned.json')
 
     with open(raw_sentences_json, 'w', encoding='utf-8') as f:
         json.dump(sentences, f, ensure_ascii=False, indent=2)
 
-    print("[CLEAN] 清洗文案中...")
-    clean_script = os.path.join(os.path.dirname(__file__), 'clean_script_for_tts.py')
+    print("[CLEAN] TTS cleanup is handled inside generate_voiceover.py")
 
-    result = subprocess.run(
-        [python_path, clean_script, '--input', raw_sentences_json, '--output', cleaned_sentences_json, '--config', config_path],
-        capture_output=True,
-        text=True,
-        encoding='utf-8',
-        errors='replace',
-        timeout=300
-    )
-
-    if result.returncode != 0:
-        print(f"[WARN] 文案清洗失败，使用原文案", file=sys.stderr)
-        print(result.stderr, file=sys.stderr)
-        sentences_json = raw_sentences_json
-    else:
-        print("[OK] 文案清洗完成")
-        sentences_json = cleaned_sentences_json
-
-    # 调用TTS脚本（使用清洗后的文案）
+    # 调用TTS脚本（保留原文字幕，TTS 层自行清洗）
     tts_script = os.path.join(os.path.dirname(__file__), 'generate_voiceover.py')
     audio_output_dir = os.path.join(output_dir, 'audio')
     os.makedirs(audio_output_dir, exist_ok=True)
@@ -679,7 +669,7 @@ def generate_audio(srt_path, output_dir, config_path, python_path):
     try:
         result = subprocess.run(
             [python_path, tts_script,
-             '--sentences', sentences_json,
+             '--sentences', raw_sentences_json,
              '--output-dir', audio_output_dir,
              '--config', config_path],
             capture_output=True,

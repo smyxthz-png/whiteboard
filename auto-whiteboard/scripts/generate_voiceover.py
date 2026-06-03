@@ -3,24 +3,29 @@
 """Generate per-sentence TTS audio, merge it, and create sync-accurate SRT."""
 
 import argparse
+import base64
 import configparser
 import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
+from pathlib import Path
 
 import requests
 
 try:
     from clean_script_for_tts import clean_sentences as clean_tts_sentences
+    from clean_script_for_tts import clean_text_with_regex as clean_tts_text
 except Exception as exc:  # pragma: no cover - cleanup can still be skipped
     clean_tts_sentences = None
+    clean_tts_text = None
     CLEAN_TTS_IMPORT_ERROR = exc
 
 
@@ -30,6 +35,18 @@ if sys.platform == "win32":
 
 
 RUNNINGHUB_TTS_APP_ID = "1966743528380510209"
+MINIMAX_DEFAULT_API_URL = "https://api.302.ai/minimaxi/v1/t2a_v2"
+MINIMAX_DEFAULT_MODEL = "speech-2.8-turbo"
+MINIMAX_DEFAULT_VOICE_ID = "Chinese (Mandarin)_Warm_Bestie"
+MINIMAX_DEFAULT_SKILL_DIR = str(Path.home() / ".codex" / "skills" / "minimax-tts-pipeline")
+INVALID_API_KEYS = {
+    "",
+    "your_api_key_here",
+    "your_302_api_key_here",
+    "your_minimax_api_key_here",
+    "your_minimax_key_here",
+    "your_302_or_minimax_api_key_here",
+}
 
 
 def load_config(config_path):
@@ -56,6 +73,8 @@ def mask_secret(value):
 
 def get_tts_provider(config):
     provider = (os.environ.get("TTS_PROVIDER") or config.get("TTS", "provider", fallback="runninghub")).strip().lower()
+    if provider in {"minimax", "mini_max", "minimax_tts", "minimax-tts", "speech_2_8", "speech-2.8"}:
+        return "minimax"
     if provider in {"fish", "fish_audio", "fishaudio"}:
         return "fish"
     if provider in {"302", "302ai", "index_tts2", "index-tts2", "302_index_tts2", "302-index-tts2"}:
@@ -63,12 +82,18 @@ def get_tts_provider(config):
     return "runninghub"
 
 
+def config_get(config, section, option, fallback=""):
+    if config.has_section(section):
+        return config.get(section, option, fallback=fallback)
+    return fallback
+
+
 def config_env(config, section, option, env_names, fallback=""):
     for env_name in env_names:
         value = os.environ.get(env_name)
         if value:
             return value
-    return config.get(section, option, fallback=fallback)
+    return config_get(config, section, option, fallback=fallback)
 
 
 def parse_bool(value, fallback=False):
@@ -103,6 +128,14 @@ def should_clean_tts_text(config):
 
 def text_hash(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def stable_hash(payload):
@@ -186,6 +219,18 @@ def prepare_tts_sentence_records(sentences, config, output_dir=None, skip_clean=
 
 def tts_cache_identity(config, reference_audio, tone):
     provider = get_tts_provider(config)
+    if provider == "minimax":
+        return {
+            "provider": provider,
+            "api_url": config_env(config, "MiniMax", "api_url", ["MINIMAX_API_URL", "AI302_MINIMAX_API_URL"], MINIMAX_DEFAULT_API_URL),
+            "model": config_env(config, "MiniMax", "model", ["MINIMAX_TTS_MODEL"], MINIMAX_DEFAULT_MODEL),
+            "voice_id": config_env(config, "MiniMax", "voice_id", ["MINIMAX_VOICE_ID", "MINIMAX_TTS_VOICE_ID"], MINIMAX_DEFAULT_VOICE_ID),
+            "speed": config_env(config, "MiniMax", "speed", ["MINIMAX_TTS_SPEED"], "1"),
+            "vol": config_env(config, "MiniMax", "vol", ["MINIMAX_TTS_VOL"], "1"),
+            "pitch": config_env(config, "MiniMax", "pitch", ["MINIMAX_TTS_PITCH"], "0"),
+            "subtitle_type": config_env(config, "MiniMax", "subtitle_type", ["MINIMAX_SUBTITLE_TYPE"], "word"),
+            "output_format": config_env(config, "MiniMax", "output_format", ["MINIMAX_OUTPUT_FORMAT"], "url"),
+        }
     if provider == "fish":
         return {
             "provider": provider,
@@ -253,6 +298,16 @@ def is_valid_audio(audio_path, min_duration=0.05):
     if os.path.getsize(audio_path) < 1024:
         return False
     return get_audio_duration(audio_path) >= min_duration
+
+
+def is_valid_srt(srt_path):
+    if not os.path.exists(srt_path) or os.path.getsize(srt_path) < 20:
+        return False
+    try:
+        content = Path(srt_path).read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        return False
+    return bool(re.search(r"\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}", content))
 
 
 def format_srt_timestamp(seconds):
@@ -455,6 +510,426 @@ def load_index_tts2_settings(config):
     print(f"[INFO] IndexTTS2 base_url: {base_url}")
     print(f"[INFO] IndexTTS2 speaker_audio_url: {speaker_audio_url}")
     return settings
+
+
+def load_minimax_settings(config):
+    api_key = config_env(
+        config,
+        "MiniMax",
+        "api_key",
+        ["MINIMAX_API_KEY", "AI302_API_KEY", "TTS_302_API_KEY", "INDEX_TTS2_API_KEY"],
+        "",
+    )
+    if not api_key:
+        api_key = config_get(config, "IndexTTS2", "api_key", fallback="")
+    if not api_key or api_key.strip().lower() in INVALID_API_KEYS:
+        raise RuntimeError("Please configure a valid MiniMax/302 API key in [MiniMax].api_key or MINIMAX_API_KEY")
+
+    skill_dir = config_env(
+        config,
+        "MiniMax",
+        "skill_dir",
+        ["MINIMAX_TTS_SKILL_DIR"],
+        MINIMAX_DEFAULT_SKILL_DIR,
+    )
+    skill_dir = os.path.expandvars(os.path.expanduser(skill_dir))
+    title_to_srt = Path(skill_dir) / "scripts" / "title_to_srt.py"
+    if not title_to_srt.exists():
+        raise RuntimeError(f"MiniMax skill title_to_srt.py not found: {title_to_srt}")
+
+    settings = {
+        "provider": "minimax",
+        "api_key": api_key,
+        "api_url": config_env(
+            config,
+            "MiniMax",
+            "api_url",
+            ["MINIMAX_API_URL", "AI302_MINIMAX_API_URL"],
+            MINIMAX_DEFAULT_API_URL,
+        ),
+        "model": config_env(config, "MiniMax", "model", ["MINIMAX_TTS_MODEL"], MINIMAX_DEFAULT_MODEL),
+        "voice_id": config_env(
+            config,
+            "MiniMax",
+            "voice_id",
+            ["MINIMAX_VOICE_ID", "MINIMAX_TTS_VOICE_ID"],
+            MINIMAX_DEFAULT_VOICE_ID,
+        ),
+        "speed": float(config_env(config, "MiniMax", "speed", ["MINIMAX_TTS_SPEED"], "1")),
+        "vol": float(config_env(config, "MiniMax", "vol", ["MINIMAX_TTS_VOL"], "1")),
+        "pitch": float(config_env(config, "MiniMax", "pitch", ["MINIMAX_TTS_PITCH"], "0")),
+        "text_normalization": parse_bool(
+            config_env(config, "MiniMax", "text_normalization", ["MINIMAX_TEXT_NORMALIZATION"], "true"),
+            True,
+        ),
+        "subtitle_type": config_env(config, "MiniMax", "subtitle_type", ["MINIMAX_SUBTITLE_TYPE"], "word"),
+        "output_format": config_env(config, "MiniMax", "output_format", ["MINIMAX_OUTPUT_FORMAT"], "url"),
+        "timeout": config.getint("MiniMax", "timeout", fallback=600) if config.has_section("MiniMax") else 600,
+        "max_chars": config.getint("MiniMax", "max_chars", fallback=9000) if config.has_section("MiniMax") else 9000,
+        "skill_dir": str(Path(skill_dir).resolve()),
+        "title_to_srt": str(title_to_srt.resolve()),
+    }
+    print(f"[INFO] MiniMax/302 API key: {mask_secret(api_key)}")
+    print(f"[INFO] MiniMax API URL: {settings['api_url']}")
+    print(f"[INFO] MiniMax model: {settings['model']}")
+    print(f"[INFO] MiniMax voice_id: {settings['voice_id']}")
+    return settings
+
+
+def count_srt_entries(srt_path):
+    if not os.path.exists(srt_path):
+        return 0
+    content = Path(srt_path).read_text(encoding="utf-8-sig")
+    return len(re.findall(r"(?m)^\d+\s*$", content))
+
+
+def subtitle_records_to_text(records, key):
+    parts = []
+    for record in records:
+        text = str(record.get(key) or record.get("tts_text") or record.get("text") or "").strip()
+        if not text:
+            continue
+        if text[-1] not in "。！？；：，、,.!?;:":
+            text = f"{text}。"
+        parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def sanitize_minimax_text(text):
+    text = str(text or "").strip()
+    if clean_tts_text is not None:
+        cleaned = clean_tts_text(text)
+        if cleaned:
+            text = cleaned
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def load_minimax_user_terms(skill_dir):
+    rules_path = Path(skill_dir) / "user-rules.json"
+    if not rules_path.exists():
+        return []
+    try:
+        data = json.loads(rules_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[WARN] Ignoring unreadable MiniMax user-rules.json: {exc}", file=sys.stderr)
+        return []
+    terms = data.get("terms", []) if isinstance(data, dict) else []
+    return [term for term in terms if isinstance(term, dict) and term.get("text")]
+
+
+def build_minimax_terms(text, settings):
+    terms = []
+    seen = set()
+    for term in load_minimax_user_terms(settings["skill_dir"]):
+        term_text = str(term.get("text") or "").strip()
+        if not term_text or term_text in seen or term_text not in text:
+            continue
+        category = str(term.get("category") or "skip").strip() or "skip"
+        if category not in {"skip", "normalize", "tone", "normalize_tone"}:
+            category = "skip"
+        normalized = str(term.get("normalized") or term_text).strip()
+        reading = str(term.get("reading") or "").strip()
+        terms.append(
+            {
+                "text": term_text,
+                "normalized": normalized,
+                "category": category,
+                "reading": reading,
+                "reason": term.get("reason") if isinstance(term.get("reason"), dict) else {},
+            }
+        )
+        seen.add(term_text)
+
+    return {
+        "review": {"status": "pass", "notes": ["auto-generated for whiteboard MiniMax TTS"]},
+        "terms": terms,
+    }
+
+
+def apply_minimax_normalization(text, terms_data):
+    replacements = []
+    for term in terms_data.get("terms", []):
+        source = str(term.get("text") or "")
+        normalized = str(term.get("normalized") or "")
+        category = str(term.get("category") or "")
+        if category in {"normalize", "normalize_tone"} and source and normalized and source != normalized:
+            replacements.append((source, normalized))
+
+    replacements.sort(key=lambda item: len(item[0]), reverse=True)
+    for source, normalized in replacements:
+        text = text.replace(source, normalized)
+    return text, len(replacements)
+
+
+def minimax_tone_rules(terms_data):
+    tone = []
+    for term in terms_data.get("terms", []):
+        category = str(term.get("category") or "")
+        if category not in {"tone", "normalize_tone"}:
+            continue
+        key = str(term.get("normalized") or term.get("text") or "").strip()
+        reading = str(term.get("reading") or "").strip()
+        if key and reading and key != reading:
+            tone.append(f"{key}/{reading}")
+    return tone
+
+
+def write_minimax_inputs(run_dir, raw_text, normalized_text, terms_data):
+    run_path = Path(run_dir)
+    run_path.mkdir(parents=True, exist_ok=True)
+    input_raw_path = run_path / "input.raw.txt"
+    input_path = run_path / "input.txt"
+    normalized_path = run_path / "normalized.txt"
+    terms_path = run_path / "terms.json"
+    input_raw_path.write_text(raw_text, encoding="utf-8")
+    input_path.write_text(raw_text, encoding="utf-8")
+    normalized_path.write_text(normalized_text, encoding="utf-8")
+    terms_path.write_text(json.dumps(terms_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "input_raw_path": str(input_raw_path),
+        "input_path": str(input_path),
+        "normalized_path": str(normalized_path),
+        "terms_path": str(terms_path),
+    }
+
+
+def download_or_decode_file(value, output_path, timeout=120, expect_json=False):
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output.with_suffix(f"{output.suffix}.tmp")
+
+    if isinstance(value, (dict, list)):
+        temp_path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    else:
+        value = str(value or "")
+        if not value:
+            raise RuntimeError(f"Empty payload for {output.name}")
+        if value.startswith("http://") or value.startswith("https://"):
+            response = requests.get(value, timeout=timeout)
+            response.raise_for_status()
+            temp_path.write_bytes(response.content)
+        elif expect_json and value.lstrip().startswith(("[", "{")):
+            temp_path.write_text(value, encoding="utf-8")
+        else:
+            try:
+                temp_path.write_bytes(base64.b64decode(value, validate=True))
+            except Exception:
+                try:
+                    temp_path.write_bytes(bytes.fromhex(value))
+                except ValueError:
+                    temp_path.write_text(value, encoding="utf-8")
+
+    if temp_path.stat().st_size < 16:
+        raise RuntimeError(f"Downloaded payload is too small: {output}")
+    os.replace(temp_path, output)
+
+
+def ensure_pcm_wav(audio_path):
+    try:
+        import wave
+
+        with wave.open(str(audio_path), "rb") as wav:
+            if wav.getnframes() > 0:
+                return
+    except Exception:
+        pass
+
+    temp_path = f"{audio_path}.converted.wav"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(audio_path),
+        "-c:a",
+        "pcm_s16le",
+        "-ar",
+        "44100",
+        temp_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"Could not convert MiniMax audio to WAV: {exc.stderr}") from exc
+    os.replace(temp_path, audio_path)
+
+
+def run_minimax_title_to_srt(settings, title_path, audio_path, srt_path):
+    cmd = [sys.executable, settings["title_to_srt"], str(title_path), str(audio_path), str(srt_path)]
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"MiniMax title_to_srt failed: {result.stderr or result.stdout}")
+    print(result.stdout.strip())
+
+
+def submit_minimax_tts(text, terms_data, settings, output_wav, output_title):
+    tone = minimax_tone_rules(terms_data)
+    payload = {
+        "model": settings["model"],
+        "text": text,
+        "stream": False,
+        "voice_setting": {
+            "voice_id": settings["voice_id"],
+            "speed": settings["speed"],
+            "vol": settings["vol"],
+            "pitch": settings["pitch"],
+            "text_normalization": settings["text_normalization"],
+        },
+        "audio_setting": {
+            "format": "wav",
+        },
+        "pronunciation_dict": {
+            "tone": tone,
+        },
+        "output_format": settings["output_format"],
+        "subtitle_enable": True,
+        "subtitle_type": settings["subtitle_type"],
+    }
+    headers = {
+        "Authorization": f"Bearer {settings['api_key']}",
+        "Content-Type": "application/json",
+    }
+
+    print(f"[MINIMAX] Calling TTS API ({len(text)} chars, tone rules: {len(tone)})")
+    response = requests.post(settings["api_url"], headers=headers, json=payload, timeout=settings["timeout"])
+    if response.status_code >= 400:
+        error_text = response.text[:1000] if response.text else response.reason
+        raise RuntimeError(f"MiniMax TTS HTTP {response.status_code}: {error_text}")
+    data = response.json()
+
+    base_resp = data.get("base_resp") or {}
+    status_code = base_resp.get("status_code")
+    if status_code not in (None, 0, "0"):
+        message = base_resp.get("status_msg") or base_resp.get("message") or data
+        raise RuntimeError(f"MiniMax TTS API error: {message}")
+
+    payload_data = data.get("data") if isinstance(data.get("data"), dict) else data
+    audio_info = (
+        payload_data.get("audio")
+        or payload_data.get("audio_file")
+        or payload_data.get("audio_url")
+        or payload_data.get("url")
+    )
+    subtitle_info = (
+        payload_data.get("subtitle_file")
+        or payload_data.get("subtitle")
+        or payload_data.get("subtitle_url")
+        or payload_data.get("subtitle_file_url")
+    )
+    if not audio_info:
+        raise RuntimeError(f"MiniMax TTS response did not contain audio: {data}")
+    if not subtitle_info:
+        raise RuntimeError(f"MiniMax TTS response did not contain subtitle_file: {data}")
+
+    download_or_decode_file(audio_info, output_wav, timeout=settings["timeout"])
+    download_or_decode_file(subtitle_info, output_title, timeout=settings["timeout"], expect_json=True)
+    ensure_pcm_wav(output_wav)
+
+
+def generate_minimax_voiceover(records, config, output_dir, force_tts=False, source_text_path=None):
+    settings = load_minimax_settings(config)
+    raw_text = subtitle_records_to_text(records, "original_text")
+    if source_text_path:
+        try:
+            source_text = Path(source_text_path).read_text(encoding="utf-8-sig").strip()
+            if source_text:
+                raw_text = source_text
+        except OSError as exc:
+            print(f"[WARN] Could not read source text for MiniMax run archive: {exc}", file=sys.stderr)
+    spoken_text = sanitize_minimax_text(subtitle_records_to_text(records, "tts_text"))
+    if not spoken_text:
+        raise RuntimeError("MiniMax TTS text is empty")
+    if len(spoken_text) > settings["max_chars"]:
+        raise RuntimeError(
+            f"MiniMax sync TTS text is {len(spoken_text)} chars, above configured max_chars={settings['max_chars']}"
+        )
+
+    run_dir = os.path.join(output_dir, "minimax_tts")
+    output_wav = os.path.join(run_dir, "output.wav")
+    output_title = os.path.join(run_dir, "output.title")
+    output_srt = os.path.join(run_dir, "output.srt")
+    final_wav = os.path.join(output_dir, "voiceover.wav")
+    final_srt = os.path.join(output_dir, "subtitles.srt")
+    manifest_path = os.path.join(run_dir, "manifest.json")
+
+    terms_data = build_minimax_terms(spoken_text, settings)
+    normalized_text, replacements = apply_minimax_normalization(spoken_text, terms_data)
+    input_paths = write_minimax_inputs(run_dir, raw_text or spoken_text, normalized_text, terms_data)
+
+    identity = tts_cache_identity(config, None, None)
+    cache_hash = stable_hash(
+        {
+            "text": normalized_text,
+            "terms": terms_data,
+            "tts_identity": identity,
+            "title_to_srt_sha256": sha256_file(settings["title_to_srt"]),
+        }
+    )
+    manifest = read_manifest(manifest_path)
+    can_reuse = (
+        not force_tts
+        and manifest.get("cache_hash") == cache_hash
+        and is_valid_audio(output_wav)
+        and is_valid_srt(output_srt)
+    )
+
+    if can_reuse:
+        print(f"[MINIMAX] Reusing cached audio and subtitles: {run_dir}")
+    else:
+        submit_minimax_tts(normalized_text, terms_data, settings, output_wav, output_title)
+        if not is_valid_audio(output_wav):
+            raise RuntimeError("MiniMax generated audio is invalid")
+        run_minimax_title_to_srt(settings, output_title, output_wav, output_srt)
+        if not is_valid_srt(output_srt):
+            raise RuntimeError("MiniMax generated SRT is invalid")
+        write_manifest(
+            manifest_path,
+            {
+                "cache_hash": cache_hash,
+                "text_hash": text_hash(normalized_text),
+                "tts_identity": identity,
+                "input_paths": input_paths,
+                "output_wav": os.path.abspath(output_wav),
+                "output_title": os.path.abspath(output_title),
+                "output_srt": os.path.abspath(output_srt),
+                "term_count": len(terms_data.get("terms", [])),
+                "tone_rule_count": len(minimax_tone_rules(terms_data)),
+                "replacements_applied": replacements,
+            },
+        )
+
+    shutil.copy2(output_wav, final_wav)
+    shutil.copy2(output_srt, final_srt)
+    total_duration = get_audio_duration(final_wav)
+    subtitle_count = count_srt_entries(final_srt)
+    if total_duration <= 0:
+        raise RuntimeError("MiniMax voiceover duration is zero")
+
+    return {
+        "voiceover_path": os.path.abspath(final_wav),
+        "srt_path": os.path.abspath(final_srt),
+        "total_duration": total_duration,
+        "segment_count": subtitle_count,
+        "tts_sentences_path": os.path.abspath(os.path.join(output_dir, "tts_sentences.json"))
+        if os.path.exists(os.path.join(output_dir, "tts_sentences.json"))
+        else None,
+        "provider": "minimax",
+        "minimax_run_dir": os.path.abspath(run_dir),
+        "minimax_title_path": os.path.abspath(output_title),
+        "minimax_manifest_path": os.path.abspath(manifest_path),
+    }
 
 
 def submit_runninghub_tts(text, api_key, reference_audio, tone):
@@ -929,6 +1404,7 @@ def main():
     parser.add_argument("--sentences", required=True, help="Sentence JSON path")
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument("--config", default="../config/config.ini", help="Config file path")
+    parser.add_argument("--source-text", help="Original source text path for whole-script TTS providers")
     parser.add_argument("--pause", type=float, help="Pause between sentences in seconds")
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary segment audio")
     parser.add_argument("--concurrency", type=int, help="Number of TTS jobs to run in parallel")
@@ -950,12 +1426,19 @@ def main():
         provider_limit = config.getint("FishAudio", "concurrency", fallback=5)
     elif provider == "index_tts2":
         provider_limit = config.getint("IndexTTS2", "concurrency", fallback=5)
+    elif provider == "minimax":
+        provider_limit = 1
     else:
         provider_limit = 8
     concurrency = max(1, min(concurrency, provider_limit))
 
     with open(args.sentences, "r", encoding="utf-8-sig") as handle:
         sentences = json.load(handle)
+    if isinstance(sentences, dict):
+        if isinstance(sentences.get("sentences"), list):
+            sentences = sentences["sentences"]
+        else:
+            sentences = [sentences]
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -969,41 +1452,58 @@ def main():
                 args.output_dir,
                 skip_clean=False,
             )
-        segments = prepare_segments(sentences_for_tts, config, args.output_dir, concurrency, args.force_tts)
-        srt_content, expected_duration = build_srt(segments, pause)
 
-        srt_path = os.path.join(args.output_dir, "subtitles.srt")
-        with open(srt_path, "w", encoding="utf-8") as handle:
-            handle.write(srt_content)
-
-        voiceover_path = os.path.join(args.output_dir, "voiceover.wav")
-        merged_duration = merge_audio_segments(segments, voiceover_path, pause)
-        if abs(merged_duration - expected_duration) > 0.15:
-            print(
-                f"[WARN] Merged audio duration differs from SRT timeline: "
-                f"audio={merged_duration:.2f}s srt={expected_duration:.2f}s",
-                file=sys.stderr,
+        if provider == "minimax":
+            result = generate_minimax_voiceover(
+                sentences_for_tts,
+                config,
+                args.output_dir,
+                args.force_tts,
+                source_text_path=args.source_text,
             )
+            voiceover_path = result["voiceover_path"]
+            srt_path = result["srt_path"]
+            merged_duration = result["total_duration"]
+            segment_count = result["segment_count"]
+        else:
+            segments = prepare_segments(sentences_for_tts, config, args.output_dir, concurrency, args.force_tts)
+            srt_content, expected_duration = build_srt(segments, pause)
 
-        if not args.keep_temp:
-            temp_dir = os.path.join(args.output_dir, "temp_audio")
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-                print("[CLEANUP] Removed temporary segment audio")
+            srt_path = os.path.join(args.output_dir, "subtitles.srt")
+            with open(srt_path, "w", encoding="utf-8") as handle:
+                handle.write(srt_content)
 
-        result = {
-            "voiceover_path": os.path.abspath(voiceover_path),
-            "srt_path": os.path.abspath(srt_path),
-            "total_duration": merged_duration,
-            "segment_count": len(segments),
-            "tts_sentences_path": os.path.abspath(os.path.join(args.output_dir, "tts_sentences.json"))
-            if os.path.exists(os.path.join(args.output_dir, "tts_sentences.json"))
-            else None,
-        }
+            voiceover_path = os.path.join(args.output_dir, "voiceover.wav")
+            merged_duration = merge_audio_segments(segments, voiceover_path, pause)
+            if abs(merged_duration - expected_duration) > 0.15:
+                print(
+                    f"[WARN] Merged audio duration differs from SRT timeline: "
+                    f"audio={merged_duration:.2f}s srt={expected_duration:.2f}s",
+                    file=sys.stderr,
+                )
+
+            if not args.keep_temp:
+                temp_dir = os.path.join(args.output_dir, "temp_audio")
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+                    print("[CLEANUP] Removed temporary segment audio")
+
+            result = {
+                "voiceover_path": os.path.abspath(voiceover_path),
+                "srt_path": os.path.abspath(srt_path),
+                "total_duration": merged_duration,
+                "segment_count": len(segments),
+                "tts_sentences_path": os.path.abspath(os.path.join(args.output_dir, "tts_sentences.json"))
+                if os.path.exists(os.path.join(args.output_dir, "tts_sentences.json"))
+                else None,
+                "provider": provider,
+            }
+
         print("\n[SUCCESS] Voiceover and subtitles generated")
         print(f"[OUTPUT] voiceover: {voiceover_path}")
         print(f"[OUTPUT] subtitles: {srt_path}")
         print(f"[INFO] duration: {merged_duration:.2f}s")
+        print(f"[INFO] subtitles: {segment_count}")
         print(f"\nRESULT_JSON={json.dumps(result, ensure_ascii=False)}")
     except Exception as exc:
         print(f"[ERROR] Voiceover generation failed: {exc}", file=sys.stderr)

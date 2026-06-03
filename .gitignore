@@ -19,6 +19,7 @@ auto-whiteboard/TEST_STATUS.md
 
 output/
 temp/
+bgm/
 *.mp4
 *.mov
 *.avi

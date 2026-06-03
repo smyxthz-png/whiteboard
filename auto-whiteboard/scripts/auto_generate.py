@@ -8,13 +8,14 @@ import hashlib
 import io
 import json
 import os
+import random
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
 
-WORKFLOW_VERSION = "2026-05-07-tts-clean-v4"
+WORKFLOW_VERSION = "2026-06-04-minimax-tts-v1"
 
 
 if sys.platform == "win32":
@@ -180,12 +181,52 @@ def resolve_config_path(script_dir, config_arg):
     return os.path.abspath(os.path.join(script_dir, config_arg))
 
 
+SUPPORTED_BGM_EXTENSIONS = {
+    ".aac",
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".ogg",
+    ".opus",
+    ".wav",
+}
+
+
+def resolve_bgm_path(bgm_arg):
+    if not bgm_arg:
+        return None
+
+    bgm_path = os.path.abspath(bgm_arg)
+    if not os.path.exists(bgm_path):
+        print(f"[ERROR] Background music file not found: {bgm_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if os.path.isfile(bgm_path):
+        return bgm_path
+
+    if not os.path.isdir(bgm_path):
+        print(f"[ERROR] Background music path is not a file or directory: {bgm_path}", file=sys.stderr)
+        sys.exit(1)
+
+    candidates = [
+        str(path)
+        for path in Path(bgm_path).iterdir()
+        if path.is_file() and path.suffix.lower() in SUPPORTED_BGM_EXTENSIONS
+    ]
+    if not candidates:
+        supported = ", ".join(sorted(SUPPORTED_BGM_EXTENSIONS))
+        print(f"[ERROR] No supported BGM files found in {bgm_path}. Supported: {supported}", file=sys.stderr)
+        sys.exit(1)
+
+    return random.choice(sorted(candidates))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate a whiteboard video from a text file")
     parser.add_argument("--input", required=True, help="Input text file")
     parser.add_argument("--output-dir", help="Output root directory")
     parser.add_argument("--project-dir", help="Existing project directory to resume/reuse")
-    parser.add_argument("--bgm", help="Optional background music file")
+    parser.add_argument("--bgm", help="Optional background music file or directory to pick from randomly")
     parser.add_argument("--config", default="../config/config.ini", help="Config file path")
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary files for resume/debugging")
     parser.add_argument("--tts-concurrency", type=int, help="Parallel TTS jobs")
@@ -203,9 +244,7 @@ def main():
     if not os.path.exists(config_path):
         print(f"[ERROR] Config file not found: {config_path}", file=sys.stderr)
         sys.exit(1)
-    if args.bgm and not os.path.exists(args.bgm):
-        print(f"[ERROR] Background music file not found: {args.bgm}", file=sys.stderr)
-        sys.exit(1)
+    selected_bgm_path = resolve_bgm_path(args.bgm)
 
     config = load_config(config_path)
     output_dir = os.path.abspath(args.output_dir or config.get("Paths", "output_dir", fallback="./output"))
@@ -223,7 +262,7 @@ def main():
         "input_sha256": sha256_file(args.input),
         "config_path": config_path,
         "config_sha256": sha256_file(config_path),
-        "bgm": file_identity(args.bgm),
+        "bgm": file_identity(selected_bgm_path),
         "whiteboard_overrides": {
             "fps": args.whiteboard_fps,
             "jobs": args.whiteboard_jobs,
@@ -239,6 +278,8 @@ def main():
     print("=" * 72)
     print(f"[PROJECT] {project_dir}")
     print(f"[INPUT]   {os.path.abspath(args.input)}")
+    if selected_bgm_path:
+        print(f"[BGM]     {selected_bgm_path}")
 
     print("\n" + "=" * 72)
     print("Step 1/5: split text")
@@ -266,7 +307,16 @@ def main():
     print("\n" + "=" * 72)
     print("Step 2/5: generate voiceover and subtitles")
     print("=" * 72)
-    tts_args = ["--sentences", sentences_path, "--output-dir", project_dir, "--config", config_path]
+    tts_args = [
+        "--sentences",
+        sentences_path,
+        "--output-dir",
+        project_dir,
+        "--config",
+        config_path,
+        "--source-text",
+        args.input,
+    ]
     if args.keep_temp:
         tts_args.append("--keep-temp")
     if args.tts_concurrency:
@@ -337,7 +387,7 @@ def main():
     scene_count = result.get("scene_count", 0)
     print(f"[OK] Whiteboard animation: {scene_count} scenes")
 
-    if args.bgm:
+    if selected_bgm_path:
         print("\n" + "=" * 72)
         print("Step 4/5: mix audio")
         print("=" * 72)
@@ -348,7 +398,7 @@ def main():
                 "--voiceover",
                 voiceover_path,
                 "--bgm",
-                args.bgm,
+                selected_bgm_path,
                 "--output",
                 mixed_audio_path,
                 "--config",

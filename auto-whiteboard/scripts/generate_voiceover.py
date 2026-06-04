@@ -525,6 +525,14 @@ def load_minimax_settings(config):
     if not api_key or api_key.strip().lower() in INVALID_API_KEYS:
         raise RuntimeError("Please configure a valid MiniMax/302 API key in [MiniMax].api_key or MINIMAX_API_KEY")
 
+    local_title_to_srt = Path(__file__).with_name("minimax_title_to_srt.py")
+    configured_title_to_srt = config_env(
+        config,
+        "MiniMax",
+        "title_to_srt",
+        ["MINIMAX_TITLE_TO_SRT"],
+        str(local_title_to_srt) if local_title_to_srt.exists() else "",
+    )
     skill_dir = config_env(
         config,
         "MiniMax",
@@ -533,7 +541,7 @@ def load_minimax_settings(config):
         MINIMAX_DEFAULT_SKILL_DIR,
     )
     skill_dir = os.path.expandvars(os.path.expanduser(skill_dir))
-    title_to_srt = Path(skill_dir) / "scripts" / "title_to_srt.py"
+    title_to_srt = Path(os.path.expandvars(os.path.expanduser(configured_title_to_srt))) if configured_title_to_srt else Path(skill_dir) / "scripts" / "title_to_srt.py"
     if not title_to_srt.exists():
         raise RuntimeError(f"MiniMax skill title_to_srt.py not found: {title_to_srt}")
 
@@ -841,6 +849,7 @@ def submit_minimax_tts(text, terms_data, settings, output_wav, output_title):
 def generate_minimax_voiceover(records, config, output_dir, force_tts=False, source_text_path=None):
     settings = load_minimax_settings(config)
     raw_text = subtitle_records_to_text(records, "original_text")
+    source_text = ""
     if source_text_path:
         try:
             source_text = Path(source_text_path).read_text(encoding="utf-8-sig").strip()
@@ -848,7 +857,7 @@ def generate_minimax_voiceover(records, config, output_dir, force_tts=False, sou
                 raw_text = source_text
         except OSError as exc:
             print(f"[WARN] Could not read source text for MiniMax run archive: {exc}", file=sys.stderr)
-    spoken_text = sanitize_minimax_text(subtitle_records_to_text(records, "tts_text"))
+    spoken_text = sanitize_minimax_text(source_text or subtitle_records_to_text(records, "tts_text"))
     if not spoken_text:
         raise RuntimeError("MiniMax TTS text is empty")
     if len(spoken_text) > settings["max_chars"]:

@@ -25,6 +25,18 @@ def load_config(config_path):
     return config
 
 
+DECIMAL_DOT_PLACEHOLDER = "\x07"
+
+
+def protect_decimal_points(text):
+    """Keep decimal numbers intact while splitting on sentence punctuation."""
+    return re.sub(r"(?<=\d)\.(?=\d)", DECIMAL_DOT_PLACEHOLDER, text)
+
+
+def restore_decimal_points(text):
+    return text.replace(DECIMAL_DOT_PLACEHOLDER, ".")
+
+
 def split_text_with_ai(text, api_key, min_chars=8, max_chars=24, base_url=None):
     client_kwargs = {"api_key": api_key}
     if base_url:
@@ -64,6 +76,7 @@ def simple_split(text):
     """Fallback splitter that keeps sentence-ending punctuation."""
     text = re.sub(r"\r\n?", "\n", text)
     text = re.sub(r"\n{2,}", "\n", text)
+    text = protect_decimal_points(text)
     pattern = r"[^。！？!?；;\n]+[。！？!?；;]?"
 
     sentences = []
@@ -72,7 +85,7 @@ def simple_split(text):
         if not paragraph:
             continue
         for match in re.finditer(pattern, paragraph):
-            sentence = match.group(0).strip()
+            sentence = restore_decimal_points(match.group(0).strip())
             if sentence:
                 sentences.append(sentence)
     return sentences
@@ -88,9 +101,9 @@ def split_long_sentence(sentence, max_chars, min_chars=8):
     def fits(value):
         return visual_len(value) <= max_units
 
-    sentence = sentence.strip()
+    sentence = protect_decimal_points(sentence.strip())
     if fits(sentence):
-        return [sentence]
+        return [restore_decimal_points(sentence)]
 
     break_pattern = r".+?(?:——|[，、；;：:,.])|.+$"
     pieces = [piece.strip() for piece in re.findall(break_pattern, sentence) if piece.strip()]
@@ -175,7 +188,7 @@ def split_long_sentence(sentence, max_chars, min_chars=8):
 
     balanced = rebalance_short_tail(absorb_leading_punctuation(chunks))
 
-    return [chunk for chunk in balanced if chunk]
+    return [restore_decimal_points(chunk) for chunk in balanced if chunk]
 
 
 def normalize_sentences(sentences, max_chars, min_chars=8):

@@ -12,6 +12,59 @@ import subprocess
 import configparser
 import shutil
 import hashlib
+import queue
+import threading
+import time
+from fnmatch import fnmatch
+
+
+def run_streamed(cmd, *, env=None, timeout=None):
+    """Run a subprocess, stream merged output, and return (code, output)."""
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        bufsize=1,
+        env=env,
+    )
+    lines = queue.Queue()
+    output_lines = []
+
+    def reader():
+        try:
+            for line in process.stdout:
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    deadline = None if timeout is None else time.monotonic() + timeout
+    reader_done = False
+
+    while True:
+        try:
+            line = lines.get(timeout=0.2)
+        except queue.Empty:
+            line = ...
+
+        if line is None:
+            reader_done = True
+        elif line is not ...:
+            output_lines.append(line)
+            print(line, end='')
+
+        if deadline is not None and time.monotonic() > deadline:
+            process.kill()
+            thread.join(timeout=2)
+            raise subprocess.TimeoutExpired(cmd, timeout, output=''.join(output_lines))
+
+        returncode = process.poll()
+        if returncode is not None and reader_done:
+            return returncode, ''.join(output_lines)
 
 
 def check_ffmpeg():
@@ -386,6 +439,57 @@ def parse_generated_image_results(stdout_text, expected_count):
     return None
 
 
+def image_index_suffix(index, total):
+    return str(index + 1).zfill(len(str(total))) if total > 1 else '1'
+
+
+def latest_indexed_image(cache_dir, index, total):
+    suffix = image_index_suffix(index, total)
+    patterns = [
+        f'image2_{suffix}_*.png',
+        f'image2_{suffix}_*.jpg',
+        f'image2_{suffix}_*.jpeg',
+        f'banana2_*_{suffix}.png',
+        f'banana2_*_{suffix}.jpg',
+        f'banana2_*_{suffix}.jpeg',
+    ]
+    if total == 1:
+        patterns.extend(['image2_1_*.png', 'banana2_*.png', 'banana2_*.jpg', 'banana2_*.jpeg'])
+
+    candidates = []
+    for pattern in patterns:
+        candidates.extend(
+            os.path.join(cache_dir, name)
+            for name in os.listdir(cache_dir)
+            if fnmatch(name, pattern) and is_valid_asset_file(os.path.join(cache_dir, name))
+        )
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: os.path.getmtime(path))
+
+
+def collect_indexed_images(cache_dir, expected_count):
+    return [
+        latest_indexed_image(cache_dir, index, expected_count)
+        for index in range(expected_count)
+    ]
+
+
+def cleanup_image_temp_files(cache_dir):
+    if not os.path.isdir(cache_dir):
+        return
+    for name in os.listdir(cache_dir):
+        path = os.path.join(cache_dir, name)
+        lower = name.lower()
+        try:
+            if os.path.isdir(path) and name.startswith('_missing_'):
+                shutil.rmtree(path, ignore_errors=True)
+            elif os.path.isfile(path) and (lower.endswith('.tmp') or '.tmp.' in lower):
+                os.remove(path)
+        except OSError:
+            pass
+
+
 def parse_batch_video_results(stdout_text, expected_count):
     """Extract ordered video paths from batch_generate.py output."""
     for line in reversed(stdout_text.splitlines()):
@@ -463,6 +567,7 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
         image_cache_dir = os.path.join(image_dir, f"cache_{prompt_hash[:16]}")
         manifest_path = os.path.join(image_cache_dir, "image_manifest.json")
         os.makedirs(image_cache_dir, exist_ok=True)
+        cleanup_image_temp_files(image_cache_dir)
 
         if force:
             for name in os.listdir(image_cache_dir):
@@ -479,30 +584,50 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
             if cached_images:
                 print(f"[REUSE] Image cache hit: {len(cached_images)} images ({prompt_hash[:12]})")
                 return cached_images
+            indexed_images = collect_indexed_images(image_cache_dir, len(prompts))
+            if all(indexed_images):
+                write_json_atomic(manifest_path, {
+                    'prompt_hash': prompt_hash,
+                    'identity': identity,
+                    'prompt_count': len(prompts),
+                    'image_files': indexed_images,
+                })
+                print(f"[REUSE] Image files recovered without manifest: {len(indexed_images)} images ({prompt_hash[:12]})")
+                return indexed_images
 
         # Generate images
         image_script = os.path.join(skill_dir, 'scripts', 'generate-image.py')
+        indexed_images = collect_indexed_images(image_cache_dir, len(prompts))
+        missing_indices = [i for i, path in enumerate(indexed_images) if not path]
+        prompts_to_generate = [prompts[i] for i in missing_indices]
+
+        if missing_indices:
+            print(
+                f"[IMAGE] Reusing {len(prompts) - len(missing_indices)} images; "
+                f"generating missing indices: {', '.join(str(i + 1) for i in missing_indices)}"
+            )
+        else:
+            prompts_to_generate = prompts
+            missing_indices = list(range(len(prompts)))
 
         # Save prompts to temp file to avoid command line length issues
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.json', delete=False) as f:
-            json.dump(prompts, f, ensure_ascii=False)
+            json.dump(prompts_to_generate, f, ensure_ascii=False)
             prompts_file = f.name
 
+        temp_image_dir = None
         try:
             # Read prompts back and pass as JSON string
             with open(prompts_file, 'r', encoding='utf-8') as f:
                 prompts_json = f.read()
 
-            print(f"[IMAGE] Calling generate-image.py with {len(prompts)} prompts...")
+            temp_image_dir = tempfile.mkdtemp(prefix="_missing_images_", dir=image_cache_dir)
+            print(f"[IMAGE] Calling generate-image.py with {len(prompts_to_generate)} prompts...")
             print(f"[IMAGE] This may take 5-10 minutes for API calls...")
 
-            result = subprocess.run(
-                [python_path, image_script, prompts_json, '16:9', image_cache_dir],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
+            returncode, stdout_text = run_streamed(
+                [python_path, image_script, prompts_json, '16:9', temp_image_dir],
                 timeout=1800  # 增加到30分钟
             )
         finally:
@@ -510,23 +635,38 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
             if os.path.exists(prompts_file):
                 os.unlink(prompts_file)
 
-        print(result.stdout)
-
-        if result.returncode != 0:
+        if returncode != 0:
             print(f"[ERROR] Image generation failed", file=sys.stderr)
-            print(result.stderr, file=sys.stderr)
             return None
 
-        image_files = parse_generated_image_results(result.stdout, len(prompts))
+        generated_files = parse_generated_image_results(stdout_text, len(prompts_to_generate))
 
-        if image_files is None:
+        if generated_files is None:
             # 兼容旧脚本输出，但仍强制校验数量，避免半成功继续。
-            image_files = sorted([
-                os.path.join(image_cache_dir, f)
-                for f in os.listdir(image_cache_dir)
+            generated_files = sorted([
+                os.path.join(temp_image_dir, f)
+                for f in os.listdir(temp_image_dir)
                 if f.endswith(('.png', '.jpg', '.jpeg'))
             ])
 
+        if len(generated_files) != len(prompts_to_generate) or not all(is_valid_asset_file(path) for path in generated_files):
+            print(
+                f"[ERROR] Image generation incomplete: expected {len(prompts_to_generate)}, got {len(generated_files)}",
+                file=sys.stderr
+            )
+            return None
+
+        for source_path, original_index in zip(generated_files, missing_indices):
+            ext = os.path.splitext(source_path)[1].lower() or '.png'
+            suffix = image_index_suffix(original_index, len(prompts))
+            dest_name = f"image2_{suffix}_{int(os.path.getmtime(source_path) * 1000)}{ext}"
+            dest_path = os.path.join(image_cache_dir, dest_name)
+            shutil.copy2(source_path, dest_path)
+
+        if temp_image_dir and os.path.isdir(temp_image_dir):
+            shutil.rmtree(temp_image_dir, ignore_errors=True)
+
+        image_files = collect_indexed_images(image_cache_dir, len(prompts))
         if len(image_files) != len(prompts) or not all(is_valid_asset_file(path) for path in image_files):
             print(
                 f"[ERROR] Image generation incomplete: expected {len(prompts)}, got {len(image_files)}",
@@ -587,23 +727,10 @@ def generate_whiteboard_videos(skill_dir, image_files, durations, video_dir, pyt
         env = os.environ.copy()
         env['PYTHONIOENCODING'] = 'utf-8'
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=False,  # 使用bytes模式
-            env=env,
-            timeout=1800  # 30 分钟
-        )
+        returncode, stdout_text = run_streamed(cmd, env=env, timeout=1800)
 
-        # 手动解码为UTF-8
-        stdout_text = result.stdout.decode('utf-8', errors='replace')
-        stderr_text = result.stderr.decode('utf-8', errors='replace')
-
-        print(stdout_text)
-
-        if result.returncode != 0:
+        if returncode != 0:
             print(f"[ERROR] Video generation failed", file=sys.stderr)
-            print(stderr_text, file=sys.stderr)
             return None
 
         video_files = parse_batch_video_results(stdout_text, len(image_files))

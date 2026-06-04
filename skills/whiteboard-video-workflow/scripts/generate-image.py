@@ -28,7 +28,7 @@ POLL_MAX_RETRIES = 5
 RETRY_BASE_DELAY_S = 3.0
 POLL_INTERVAL_S = 5.0
 T8_POLL_INTERVAL_S = 3.0
-T8_MAX_WAIT_S = 900
+T8_MAX_WAIT_S = 360
 
 BATCH_CONCURRENCY = 10
 
@@ -283,15 +283,26 @@ def request_t8_image_sync(prompt, aspect_ratio):
     if not task_id:
         raise RetryableError(f'T8 response did not contain image data or task_id: {json.dumps(result, ensure_ascii=False)}')
 
-    deadline = time.monotonic() + float(os.environ.get('T8_IMAGE_TIMEOUT', T8_MAX_WAIT_S))
-    poll_interval = float(os.environ.get('T8_IMAGE_POLL_INTERVAL', T8_POLL_INTERVAL_S))
+    try:
+        max_wait_s = max(60.0, float(os.environ.get('T8_IMAGE_TIMEOUT', T8_MAX_WAIT_S)))
+    except ValueError:
+        max_wait_s = T8_MAX_WAIT_S
+    try:
+        poll_interval = max(1.0, float(os.environ.get('T8_IMAGE_POLL_INTERVAL', T8_POLL_INTERVAL_S)))
+    except ValueError:
+        poll_interval = T8_POLL_INTERVAL_S
+
+    deadline = time.monotonic() + max_wait_s
     poll_url = f'{base_url}/images/tasks/{task_id}'
+    last_status = ''
 
     while time.monotonic() < deadline:
         poll_result = request_openai_json_sync('GET', poll_url, api_key, timeout=60)
         image_response = find_openai_image_response(poll_result)
         status_payload = poll_result.get('data') if isinstance(poll_result, dict) and isinstance(poll_result.get('data'), dict) else poll_result
         status = str(status_payload.get('status', '') if isinstance(status_payload, dict) else '').upper()
+        if status:
+            last_status = status
 
         if status in {'SUCCESS', 'SUCCEEDED', 'COMPLETED', 'DONE'} and image_response:
             return image_response
@@ -303,7 +314,7 @@ def request_t8_image_sync(prompt, aspect_ratio):
 
         time.sleep(poll_interval)
 
-    raise RetryableError(f'T8 task timed out after waiting for {task_id}.')
+    raise RetryableError(f'T8 task timed out after {max_wait_s:.0f}s for {task_id} (last status: {last_status or "unknown"}).')
 
 
 async def generate_single_macode(prompt, aspect_ratio, output_dir, index, total):

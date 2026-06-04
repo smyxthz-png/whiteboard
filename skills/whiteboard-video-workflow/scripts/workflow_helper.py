@@ -112,16 +112,10 @@ def compact_context(text: str, max_chars: int = 220) -> str:
 
 def init_dirs(output_dir: str):
     """Create storyboard, image, video subdirectories under output_dir."""
-    import shutil
     base = Path(output_dir).resolve()
 
     for name in ("storyboard", "image", "video"):
         dir_path = base / name
-        # Clean existing directory if it exists
-        if dir_path.exists():
-            print(f"[CLEANUP] Removing old {name} directory...", file=sys.stderr)
-            shutil.rmtree(dir_path)
-        # Create fresh directory
         dir_path.mkdir(parents=True, exist_ok=True)
 
     print(json.dumps({

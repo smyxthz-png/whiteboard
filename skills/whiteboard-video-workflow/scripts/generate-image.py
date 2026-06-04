@@ -212,6 +212,11 @@ def request_macode_image_sync(prompt, aspect_ratio):
     api_key = os.environ.get('MACODE_API_KEY')
     base_url = os.environ.get('MACODE_BASE_URL', '').rstrip('/')
     model = os.environ.get('MACODE_IMAGE_MODEL', 'gpt-image-2')
+    quality = (
+        os.environ.get('MACODE_IMAGE_QUALITY')
+        or os.environ.get('T8_IMAGE_QUALITY')
+        or ''
+    ).strip()
 
     if not api_key:
         raise FatalError('MACODE_API_KEY not found. Set it in .env or environment variables.')
@@ -224,6 +229,8 @@ def request_macode_image_sync(prompt, aspect_ratio):
         'size': image_size_for_aspect_ratio(aspect_ratio),
         'n': 1,
     }
+    if quality:
+        body['quality'] = quality
 
     payload = json.dumps(body).encode('utf-8')
     req = Request(f'{base_url}/images/generations', data=payload, method='POST')
@@ -641,6 +648,10 @@ async def main():
     aspect_ratio = args[1] if len(args) > 1 else '16:9'
     output_dir = args[2] if len(args) > 2 else os.getcwd()
 
+    if prompt_arg.startswith('@'):
+        prompt_file = Path(prompt_arg[1:])
+        prompt_arg = prompt_file.read_text(encoding='utf-8')
+
     if not prompt_arg.strip():
         print('Error: prompt is required and cannot be empty.')
         sys.exit(1)
@@ -648,18 +659,40 @@ async def main():
     # Ensure output directory exists
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    # Detect batch mode: prompt is a JSON-encoded array of strings
+    # Detect batch mode: prompt is a JSON-encoded array of strings, or an
+    # array of task objects that carry original scene indices for resumable runs.
     prompts = None
+    prompt_tasks = None
     try:
         parsed = json.loads(prompt_arg)
         if isinstance(parsed, list) and len(parsed) > 0 and isinstance(parsed[0], str):
             prompts = parsed
+        elif isinstance(parsed, list) and len(parsed) > 0 and isinstance(parsed[0], dict):
+            prompt_tasks = []
+            default_total = len(parsed)
+            for i, item in enumerate(parsed):
+                prompt = item.get('prompt')
+                if not isinstance(prompt, str) or not prompt.strip():
+                    continue
+                try:
+                    task_index = int(item.get('index', i))
+                except (TypeError, ValueError):
+                    task_index = i
+                try:
+                    task_total = int(item.get('total', default_total))
+                except (TypeError, ValueError):
+                    task_total = default_total
+                prompt_tasks.append({
+                    'prompt': prompt,
+                    'index': max(0, task_index),
+                    'total': max(1, task_total),
+                })
     except (json.JSONDecodeError, ValueError):
         pass
-    if not prompts:
+    if not prompts and not prompt_tasks:
         prompts = [prompt_arg]
 
-    total = len(prompts)
+    total = len(prompt_tasks) if prompt_tasks else len(prompts)
     is_batch = total > 1
     provider = get_image_provider()
     concurrency = get_batch_concurrency()
@@ -668,16 +701,28 @@ async def main():
     if is_batch:
         print(f'Batch mode: generating {total} images (concurrency: {concurrency})...')
 
-    tasks = [
-        {
-            'prompt': whiteboard_prompt_template + prompt,
-            'aspectRatio': aspect_ratio,
-            'outputDir': output_dir,
-            'index': i,
-            'total': total,
-        }
-        for i, prompt in enumerate(prompts)
-    ]
+    if prompt_tasks:
+        tasks = [
+            {
+                'prompt': whiteboard_prompt_template + task['prompt'],
+                'aspectRatio': aspect_ratio,
+                'outputDir': output_dir,
+                'index': task['index'],
+                'total': task['total'],
+            }
+            for task in prompt_tasks
+        ]
+    else:
+        tasks = [
+            {
+                'prompt': whiteboard_prompt_template + prompt,
+                'aspectRatio': aspect_ratio,
+                'outputDir': output_dir,
+                'index': i,
+                'total': total,
+            }
+            for i, prompt in enumerate(prompts)
+        ]
 
     results = await run_batch(tasks, concurrency)
 

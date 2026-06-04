@@ -439,6 +439,27 @@ def parse_generated_image_results(stdout_text, expected_count):
     return None
 
 
+def parse_partial_generated_image_results(stdout_text, expected_count):
+    """Extract ordered image paths where failures may be present."""
+    for line in reversed(stdout_text.splitlines()):
+        if line.startswith('__RESULTS__'):
+            try:
+                results = json.loads(line.replace('__RESULTS__', '', 1))
+            except json.JSONDecodeError as e:
+                print(f"[ERROR] Failed to parse image result JSON: {e}", file=sys.stderr)
+                return None
+
+            if not isinstance(results, list):
+                return None
+            if len(results) != expected_count:
+                print(
+                    f"[WARN] Image result count mismatch: expected {expected_count}, got {len(results)}",
+                    file=sys.stderr
+                )
+            return results
+    return None
+
+
 def image_index_suffix(index, total):
     return str(index + 1).zfill(len(str(total))) if total > 1 else '1'
 
@@ -488,6 +509,33 @@ def cleanup_image_temp_files(cache_dir):
                 os.remove(path)
         except OSError:
             pass
+
+
+def recover_images_from_temp_dirs(cache_dir, expected_count):
+    """Recover indexed images left in temp dirs after an interrupted API batch."""
+    if not os.path.isdir(cache_dir):
+        return 0
+    recovered = 0
+    for name in os.listdir(cache_dir):
+        temp_dir = os.path.join(cache_dir, name)
+        if not (os.path.isdir(temp_dir) and name.startswith('_missing_')):
+            continue
+        for index in range(expected_count):
+            source_path = latest_indexed_image(temp_dir, index, expected_count)
+            if source_path:
+                copy_indexed_image_to_cache(source_path, index, expected_count, cache_dir)
+                recovered += 1
+    return recovered
+
+
+def copy_indexed_image_to_cache(source_path, original_index, total, image_cache_dir):
+    ext = os.path.splitext(source_path)[1].lower() or '.png'
+    suffix = image_index_suffix(original_index, total)
+    dest_name = f"image2_{suffix}_{int(os.path.getmtime(source_path) * 1000)}{ext}"
+    dest_path = os.path.join(image_cache_dir, dest_name)
+    if os.path.abspath(source_path) != os.path.abspath(dest_path):
+        shutil.copy2(source_path, dest_path)
+    return dest_path
 
 
 def parse_batch_video_results(stdout_text, expected_count):
@@ -567,6 +615,9 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
         image_cache_dir = os.path.join(image_dir, f"cache_{prompt_hash[:16]}")
         manifest_path = os.path.join(image_cache_dir, "image_manifest.json")
         os.makedirs(image_cache_dir, exist_ok=True)
+        recovered_temp_images = recover_images_from_temp_dirs(image_cache_dir, len(prompts))
+        if recovered_temp_images:
+            print(f"[RECOVER] Salvaged {recovered_temp_images} images from previous temp batches")
         cleanup_image_temp_files(image_cache_dir)
 
         if force:
@@ -599,7 +650,14 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
         image_script = os.path.join(skill_dir, 'scripts', 'generate-image.py')
         indexed_images = collect_indexed_images(image_cache_dir, len(prompts))
         missing_indices = [i for i, path in enumerate(indexed_images) if not path]
-        prompts_to_generate = [prompts[i] for i in missing_indices]
+        prompt_tasks_to_generate = [
+            {
+                'prompt': prompts[i],
+                'index': i,
+                'total': len(prompts),
+            }
+            for i in missing_indices
+        ]
 
         if missing_indices:
             print(
@@ -607,13 +665,21 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
                 f"generating missing indices: {', '.join(str(i + 1) for i in missing_indices)}"
             )
         else:
-            prompts_to_generate = prompts
             missing_indices = list(range(len(prompts)))
+            prompt_tasks_to_generate = [
+                {
+                    'prompt': prompt,
+                    'index': i,
+                    'total': len(prompts),
+                }
+                for i, prompt in enumerate(prompts)
+            ]
+        prompts_to_generate = prompt_tasks_to_generate
 
         # Save prompts to temp file to avoid command line length issues
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.json', delete=False) as f:
-            json.dump(prompts_to_generate, f, ensure_ascii=False)
+            json.dump(prompt_tasks_to_generate, f, ensure_ascii=False)
             prompts_file = f.name
 
         temp_image_dir = None
@@ -623,11 +689,11 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
                 prompts_json = f.read()
 
             temp_image_dir = tempfile.mkdtemp(prefix="_missing_images_", dir=image_cache_dir)
-            print(f"[IMAGE] Calling generate-image.py with {len(prompts_to_generate)} prompts...")
+            print(f"[IMAGE] Calling generate-image.py with {len(prompt_tasks_to_generate)} prompts...")
             print(f"[IMAGE] This may take 5-10 minutes for API calls...")
 
             returncode, stdout_text = run_streamed(
-                [python_path, image_script, prompts_json, '16:9', temp_image_dir],
+                [python_path, image_script, f"@{prompts_file}", '16:9', temp_image_dir],
                 timeout=1800  # 增加到30分钟
             )
         finally:
@@ -635,11 +701,34 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
             if os.path.exists(prompts_file):
                 os.unlink(prompts_file)
 
+        generated_results = parse_partial_generated_image_results(
+            stdout_text,
+            len(prompt_tasks_to_generate),
+        )
+        if generated_results is None:
+            generated_results = parse_generated_image_results(stdout_text, len(prompt_tasks_to_generate))
+
         if returncode != 0:
             print(f"[ERROR] Image generation failed", file=sys.stderr)
-            return None
 
-        generated_files = parse_generated_image_results(stdout_text, len(prompts_to_generate))
+        generated_files = None
+        if generated_results is not None:
+            successful_pairs = []
+            for result_item, task in zip(generated_results, prompt_tasks_to_generate):
+                original_index = task['index']
+                source_path = result_item if isinstance(result_item, str) else None
+                if source_path and is_valid_asset_file(source_path):
+                    successful_pairs.append((source_path, original_index))
+                elif isinstance(result_item, dict) and result_item.get('error'):
+                    print(
+                        f"[WARN] Image {original_index + 1} failed: {result_item.get('error')}",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"[WARN] Image {original_index + 1} missing from generation output", file=sys.stderr)
+            generated_files = [path for path, _index in successful_pairs]
+            missing_indices = [_index for _path, _index in successful_pairs]
+            prompts_to_generate = generated_files
 
         if generated_files is None:
             # 兼容旧脚本输出，但仍强制校验数量，避免半成功继续。

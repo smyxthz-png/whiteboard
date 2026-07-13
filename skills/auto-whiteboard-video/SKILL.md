@@ -1,57 +1,49 @@
-# Auto Whiteboard Video Generator
+# Auto Whiteboard Video
 
-一键生成白板动画视频的完整工作流 skill。
+Use this skill when the user wants to generate a narrated whiteboard video from a text file or pasted transcript.
 
-## 功能
+## Before Running
 
-从文案到成品视频的全自动化流程：
-1. 智能分句
-2. TTS 配音生成
-3. 白板动画生成
-4. 音频混音
-5. 视频合成
-6. 字幕烧录
-
-## 使用方法
+The repository must be bootstrapped and configured:
 
 ```bash
-/auto-whiteboard-video <文案文件路径>
+python scripts/configure_keys.py
+python scripts/doctor.py
 ```
 
-或者直接提供文案内容：
+The local files below must exist and contain real user-provided keys:
+
+- `auto-whiteboard/config/config.ini`
+- `skills/whiteboard-video-workflow/.env`
+
+## Command
+
+From the repository root:
 
 ```bash
-/auto-whiteboard-video --text "你的文案内容..."
+skills/auto-whiteboard-video/skill.sh examples/demo_30s.txt --output-dir output/demo --project-dir output/demo/latest --keep-temp
 ```
 
-## 参数
+The skill delegates to:
 
-- `--output-dir`: 输出目录（默认：./output）
-- `--bgm`: 背景音乐文件路径（可选）
-- `--keep-temp`: 保留临时文件
-
-## 输出
-
-- `*_final.mp4`: 完整视频（配音+动画）
-- `*_with_subtitle.mp4`: 带字幕版本
-- `voiceover.wav`: 配音文件
-- `subtitles.srt`: 字幕文件
-
-## 依赖
-
-- Python 3.12+
-- ffmpeg
-- RunningHub API (TTS + 图片生成)
-- 白板动画生成环境
-
-## 配置
-
-在 `auto-whiteboard/config/config.ini` 中配置 API Keys：
-
-```ini
-[RunningHubTTS]
-api_key = your_tts_api_key
-
-[RunningHub]
-api_key = your_image_api_key
+```bash
+python auto-whiteboard/scripts/auto_generate.py
 ```
+
+## Defaults
+
+- TTS: MiniMax/302
+- Image provider: configured in `skills/whiteboard-video-workflow/.env`
+- BGM: configured in `auto-whiteboard/config/config.ini`
+- Subtitle display normalization: enabled by the main workflow
+
+## Output
+
+The final result is:
+
+```text
+<project-dir>/final_video.mp4
+<project-dir>/composition_report.json
+```
+
+Report the final video path and the validation metrics from `composition_report.json`.

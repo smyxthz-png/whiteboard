@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-WORKFLOW_VERSION = "2026-06-04-minimax-tts-v1"
+WORKFLOW_VERSION = "2026-07-12-locked-1920x1080-v1"
 
 
 if sys.platform == "win32":
@@ -192,11 +192,23 @@ SUPPORTED_BGM_EXTENSIONS = {
 }
 
 
-def resolve_bgm_path(bgm_arg):
+def resolve_bgm_path(bgm_arg, base_dir=None):
     if not bgm_arg:
         return None
 
-    bgm_path = os.path.abspath(bgm_arg)
+    expanded = os.path.expandvars(os.path.expanduser(str(bgm_arg).strip()))
+    if not expanded:
+        return None
+
+    candidates = []
+    if os.path.isabs(expanded):
+        candidates.append(expanded)
+    else:
+        if base_dir:
+            candidates.append(os.path.abspath(os.path.join(base_dir, expanded)))
+        candidates.append(os.path.abspath(expanded))
+
+    bgm_path = next((path for path in candidates if os.path.exists(path)), candidates[0])
     if not os.path.exists(bgm_path):
         print(f"[ERROR] Background music file not found: {bgm_path}", file=sys.stderr)
         sys.exit(1)
@@ -227,6 +239,7 @@ def main():
     parser.add_argument("--output-dir", help="Output root directory")
     parser.add_argument("--project-dir", help="Existing project directory to resume/reuse")
     parser.add_argument("--bgm", help="Optional background music file or directory to pick from randomly")
+    parser.add_argument("--bgm-volume", type=int, help="Override BGM volume in dB when mixing audio")
     parser.add_argument("--config", default="../config/config.ini", help="Config file path")
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary files for resume/debugging")
     parser.add_argument("--tts-concurrency", type=int, help="Parallel TTS jobs")
@@ -244,9 +257,10 @@ def main():
     if not os.path.exists(config_path):
         print(f"[ERROR] Config file not found: {config_path}", file=sys.stderr)
         sys.exit(1)
-    selected_bgm_path = resolve_bgm_path(args.bgm)
-
     config = load_config(config_path)
+    config_dir = os.path.dirname(config_path)
+    default_bgm = config.get("Paths", "default_bgm", fallback="").strip()
+    selected_bgm_path = resolve_bgm_path(args.bgm or default_bgm, base_dir=config_dir)
     output_dir = os.path.abspath(args.output_dir or config.get("Paths", "output_dir", fallback="./output"))
 
     if args.project_dir:
@@ -263,6 +277,7 @@ def main():
         "config_path": config_path,
         "config_sha256": sha256_file(config_path),
         "bgm": file_identity(selected_bgm_path),
+        "bgm_volume": args.bgm_volume,
         "whiteboard_overrides": {
             "fps": args.whiteboard_fps,
             "jobs": args.whiteboard_jobs,
@@ -392,19 +407,19 @@ def main():
         print("Step 4/5: mix audio")
         print("=" * 72)
         mixed_audio_path = os.path.join(project_dir, "mixed_audio.wav")
-        success, _ = run_script(
-            os.path.join(script_dir, "audio_mixer.py"),
-            [
-                "--voiceover",
-                voiceover_path,
-                "--bgm",
-                selected_bgm_path,
-                "--output",
-                mixed_audio_path,
-                "--config",
-                config_path,
-            ],
-        )
+        audio_mixer_args = [
+            "--voiceover",
+            voiceover_path,
+            "--bgm",
+            selected_bgm_path,
+            "--output",
+            mixed_audio_path,
+            "--config",
+            config_path,
+        ]
+        if args.bgm_volume is not None:
+            audio_mixer_args.extend(["--bgm-volume", str(args.bgm_volume)])
+        success, _ = run_script(os.path.join(script_dir, "audio_mixer.py"), audio_mixer_args)
         if not success:
             print("[ERROR] Audio mixing failed", file=sys.stderr)
             sys.exit(1)

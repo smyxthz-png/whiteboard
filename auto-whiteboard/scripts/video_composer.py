@@ -73,6 +73,17 @@ def probe_media(path):
     }
 
 
+def parse_resolution(value, fallback=(1920, 1080)):
+    match = re.match(r'^\s*(\d+)\s*x\s*(\d+)\s*$', str(value or ''), re.IGNORECASE)
+    if not match:
+        return fallback
+    width = int(match.group(1))
+    height = int(match.group(2))
+    if width <= 0 or height <= 0:
+        return fallback
+    return width, height
+
+
 def parse_srt_timestamp(timestamp):
     """SRT 时间戳转秒。"""
     match = re.match(r'(\d{2}):(\d{2}):(\d{2}),(\d{3})', timestamp)
@@ -279,7 +290,9 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
     target_duration = audio_info['duration'] or video_info['duration']
     pad_duration = max(0.0, target_duration - video_info['duration'])
 
-    srt_to_ass(srt_path, ass_path, config, video_info['width'], video_info['height'])
+    target_width, target_height = parse_resolution(config.get('Video', 'resolution', fallback='1920x1080'))
+
+    srt_to_ass(srt_path, ass_path, config, target_width, target_height)
     source_subtitle_stats = analyze_srt(srt_path)
     display_subtitle_stats = analyze_ass(ass_path)
 
@@ -298,6 +311,9 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
         f"[0:v]tpad=stop_mode=clone:stop_duration={pad_duration:.3f},"
         f"trim=duration={target_duration:.3f},"
         f"setpts=PTS-STARTPTS,"
+        f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+        f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=0xF6F1E3,"
+        f"setsar=1,"
         f"ass='{ass_path_escaped}'[v]"
     )
 
@@ -356,6 +372,12 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
         'size_mb': file_size,
         'input_video_duration': video_info['duration'],
         'input_audio_duration': audio_info['duration'],
+        'input_width': video_info['width'],
+        'input_height': video_info['height'],
+        'target_width': target_width,
+        'target_height': target_height,
+        'output_width': output_info['width'],
+        'output_height': output_info['height'],
         'output_duration': output_info['duration'],
         'output_video_duration': output_info.get('video_duration', 0.0),
         'output_audio_duration': output_info.get('audio_duration', 0.0),

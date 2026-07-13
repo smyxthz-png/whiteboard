@@ -1,19 +1,20 @@
 {
   "name": "auto-whiteboard-video",
-  "version": "1.0.0",
-  "description": "一键生成白板动画视频的完整工作流",
+  "version": "2.0.0",
+  "description": "Generate narrated whiteboard videos from text using MiniMax/302 TTS and a gpt-image-2 image provider.",
   "entry": "skill.sh",
-  "author": "Your Name",
-  "tags": ["video", "whiteboard", "animation", "tts", "automation"],
+  "author": "whiteboard-video-maker",
+  "tags": ["video", "whiteboard", "animation", "tts", "subtitles", "agent"],
   "requirements": {
-    "python": ">=3.12",
-    "system": ["ffmpeg"]
+    "python": ">=3.11",
+    "system": ["ffmpeg", "ffprobe"]
   },
   "config": {
     "configFile": "../../auto-whiteboard/config/config.ini",
+    "imageEnvFile": "../whiteboard-video-workflow/.env",
     "requiredKeys": [
-      "RunningHubTTS.api_key",
-      "RunningHub.api_key"
+      "MiniMax.api_key",
+      "IMAGE_PROVIDER-specific image API key"
     ]
   }
 }

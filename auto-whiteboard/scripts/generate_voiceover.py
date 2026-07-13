@@ -28,6 +28,12 @@ except Exception as exc:  # pragma: no cover - cleanup can still be skipped
     clean_tts_text = None
     CLEAN_TTS_IMPORT_ERROR = exc
 
+try:
+    from normalize_display_subtitles import normalize_srt_file as normalize_display_srt
+except Exception as exc:  # pragma: no cover - display normalization can be skipped
+    normalize_display_srt = None
+    DISPLAY_SRT_IMPORT_ERROR = exc
+
 
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
@@ -541,7 +547,18 @@ def load_minimax_settings(config):
         MINIMAX_DEFAULT_SKILL_DIR,
     )
     skill_dir = os.path.expandvars(os.path.expanduser(skill_dir))
-    title_to_srt = Path(os.path.expandvars(os.path.expanduser(configured_title_to_srt))) if configured_title_to_srt else Path(skill_dir) / "scripts" / "title_to_srt.py"
+    if configured_title_to_srt:
+        title_to_srt = Path(os.path.expandvars(os.path.expanduser(configured_title_to_srt)))
+        if not title_to_srt.is_absolute() and not title_to_srt.exists():
+            repo_relative = Path(__file__).resolve().parents[2] / title_to_srt
+            if repo_relative.exists():
+                title_to_srt = repo_relative
+    elif local_title_to_srt.exists():
+        title_to_srt = local_title_to_srt
+    else:
+        if not skill_dir:
+            skill_dir = MINIMAX_DEFAULT_SKILL_DIR
+        title_to_srt = Path(skill_dir) / "scripts" / "title_to_srt.py"
     if not title_to_srt.exists():
         raise RuntimeError(f"MiniMax skill title_to_srt.py not found: {title_to_srt}")
 
@@ -921,6 +938,10 @@ def generate_minimax_voiceover(records, config, output_dir, force_tts=False, sou
 
     shutil.copy2(output_wav, final_wav)
     shutil.copy2(output_srt, final_srt)
+    if normalize_display_srt is not None:
+        normalize_display_srt(final_srt)
+    else:
+        print(f"[WARN] Display subtitle normalization skipped: {DISPLAY_SRT_IMPORT_ERROR}", file=sys.stderr)
     total_duration = get_audio_duration(final_wav)
     subtitle_count = count_srt_entries(final_srt)
     if total_duration <= 0:

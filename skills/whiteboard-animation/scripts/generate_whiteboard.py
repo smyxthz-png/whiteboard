@@ -21,7 +21,8 @@ HAND_PATH = str(_ASSETS_DIR / "drawing-hand.png")
 # === 固定算法参数 ===
 FRAME_RATE = 30  # 输出视频帧率；30fps 对白板动画足够顺滑，生成帧数比 60fps 少一半
 SPLIT_LEN = 10  # 网格切分边长（像素）；越小绘制越细，计算量越大
-MAX_1080P = True  # 是否将输入图最长边限制到 1080 像素，保证输出分辨率可控
+TARGET_CANVAS_WIDTH = 1920
+TARGET_CANVAS_HEIGHT = 1080
 DEFAULT_TOTAL_DURATION_SECONDS = 10  # 未传 --duration 时的视频默认总时长（秒）
 HOLD_PHASE_DURATION_SECONDS = 3  # 停留阶段基准时长（秒）；实际可能会加上 0~2ms 的余数补偿
 SKETCH_PHASE_WEIGHT = 2  # 手绘阶段时长权重；和 COLOR_PHASE_WEIGHT 一起决定动画阶段分配比例
@@ -31,6 +32,9 @@ SKIP_RATE = 4  # 每帧推进的网格步数基准；越大绘制越快，但运
 BACKGROUND_HEX = "#F6F1E3"  # 背景画布颜色
 HAND_TARGET_HT = 493  # 手部素材缩放后的目标高度（像素），基于 1080p 画布调优
 BLACK_PIXEL_THRESHOLD = 10  # 判定为“黑色线稿像素”的阈值；越大越容易把深色算作线稿
+ASPECT_RATIO_TOLERANCE = 0.03
+PAPER_MIN_CHANNEL = 190
+PAPER_MAX_CHANNEL_SPREAD = 38
 ROW_GROUP_MAX_GAP = 1  # 行分组时允许的最大空行间隔；越大越容易把相邻块合并
 BLOCK_SPAN_MAX_GAP = 1  # 布局块跨度合并时允许的最大空列/空行间隔
 BLOCK_SUB_BAND_ROWS = 3  # 结构化块内部再切分时，每个子带默认包含的行数
@@ -90,6 +94,43 @@ def preprocess_image(img, variables):
     variables["img_thresh"] = img_thresh
     variables["img"] = img
     return variables
+
+
+def normalize_paper_background(img):
+    """Map near-neutral light paper pixels to the fixed board color."""
+    minimum = np.min(img, axis=2)
+    maximum = np.max(img, axis=2)
+    paper_mask = (
+        (minimum >= PAPER_MIN_CHANNEL)
+        & ((maximum - minimum) <= PAPER_MAX_CHANNEL_SPREAD)
+    )
+    normalized = img.copy()
+    normalized[paper_mask] = BACKGROUND_BGR
+    return normalized, int(np.count_nonzero(paper_mask))
+
+
+def fit_image_to_canvas(img, target_wd, target_ht):
+    """Resize a matching-aspect image to the fixed canvas without distortion."""
+    source_ht, source_wd = img.shape[:2]
+    source_ratio = source_wd / source_ht
+    target_ratio = target_wd / target_ht
+    relative_error = abs(source_ratio - target_ratio) / target_ratio
+    if relative_error > ASPECT_RATIO_TOLERANCE:
+        raise ValueError(
+            f"输入图片比例错误: {source_wd}x{source_ht} ({source_ratio:.4f}), "
+            f"要求接近 {target_wd}:{target_ht} ({target_ratio:.4f})，"
+            f"当前误差 {relative_error * 100:.1f}% 超过 "
+            f"{ASPECT_RATIO_TOLERANCE * 100:.1f}% 容差。请重新生成为 16:9 图片。"
+        )
+    return cv2.resize(
+        img,
+        (target_wd, target_ht),
+        interpolation=(
+            cv2.INTER_AREA
+            if source_wd > target_wd or source_ht > target_ht
+            else cv2.INTER_LANCZOS4
+        ),
+    )
 
 
 def preprocess_hand_image(hand_path, variables):
@@ -1355,6 +1396,18 @@ def parse_args():
         help=f"输出视频帧率 (默认: {FRAME_RATE})"
     )
     parser.add_argument(
+        "--canvas-width",
+        type=int,
+        default=TARGET_CANVAS_WIDTH,
+        help=f"输出画布宽度 (默认: {TARGET_CANVAS_WIDTH})"
+    )
+    parser.add_argument(
+        "--canvas-height",
+        type=int,
+        default=TARGET_CANVAS_HEIGHT,
+        help=f"输出画布高度 (默认: {TARGET_CANVAS_HEIGHT})"
+    )
+    parser.add_argument(
         "--no-hand",
         action="store_true",
         help="禁用手部覆盖"
@@ -1369,6 +1422,8 @@ def main():
     output_dir = args.output_dir
     duration = args.duration
     frame_rate = max(12, min(args.fps, 60))
+    target_wd = max(SPLIT_LEN, int(args.canvas_width))
+    target_ht = max(SPLIT_LEN, int(args.canvas_height))
     draw_hand = not args.no_hand
     skip_rate = SKIP_RATE
 
@@ -1386,15 +1441,23 @@ def main():
     img_ht, img_wd = image_bgr.shape[0], image_bgr.shape[1]
     print(f"  原始尺寸: {img_wd}x{img_ht}")
 
-    # 计算目标分辨率（保持原始宽高比，长边统一缩放到 1080）
-    max_dim = 1080 if MAX_1080P else max(img_wd, img_ht)
-    scale = max_dim / max(img_wd, img_ht)
-    img_wd = int(img_wd * scale)
-    img_ht = int(img_ht * scale)
+    try:
+        image_bgr = fit_image_to_canvas(image_bgr, target_wd, target_ht)
+    except ValueError as error:
+        print(f"错误: {error}", file=sys.stderr)
+        sys.exit(2)
+    image_bgr, normalized_pixels = normalize_paper_background(image_bgr)
+    print(
+        f"  背景统一: {normalized_pixels} 像素 "
+        f"({normalized_pixels / image_bgr.shape[0] / image_bgr.shape[1] * 100:.1f}%) -> {BACKGROUND_HEX}"
+    )
+    img_ht, img_wd = image_bgr.shape[0], image_bgr.shape[1]
     # 确保宽高为 SPLIT_LEN 的倍数（网格切分需要）且为偶数（视频编码需要）
     lcm = SPLIT_LEN if SPLIT_LEN % 2 == 0 else SPLIT_LEN * 2
     img_wd = (img_wd // lcm) * lcm
     img_ht = (img_ht // lcm) * lcm
+    if img_wd != image_bgr.shape[1] or img_ht != image_bgr.shape[0]:
+        image_bgr = image_bgr[:img_ht, :img_wd]
 
     print(f"  目标尺寸: {img_wd}x{img_ht}")
 

@@ -27,6 +27,9 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+RENDERER_SHA256 = sha256_file(GENERATE_SCRIPT)
+
+
 def media_duration(path):
     try:
         result = subprocess.run(
@@ -70,13 +73,16 @@ def segment_manifest_path(output_dir, index):
     return Path(output_dir) / f"scene_{index + 1:03d}_h264.json"
 
 
-def segment_fingerprint(image_path, duration, fps, no_hand):
+def segment_fingerprint(image_path, duration, fps, no_hand, canvas_width, canvas_height):
     return {
+        "renderer_sha256": RENDERER_SHA256,
         "image_path": str(Path(image_path).resolve()),
         "image_sha256": sha256_file(image_path),
         "duration": int(duration),
         "fps": int(fps),
         "no_hand": bool(no_hand),
+        "canvas_width": int(canvas_width),
+        "canvas_height": int(canvas_height),
     }
 
 
@@ -118,7 +124,7 @@ def latest_generated_video(work_dir):
     return str(sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0])
 
 
-def run_generate_whiteboard(image_path, output_dir, duration, fps, no_hand=False):
+def run_generate_whiteboard(image_path, output_dir, duration, fps, no_hand=False, canvas_width=1920, canvas_height=1080):
     cmd = [
         sys.executable,
         str(GENERATE_SCRIPT),
@@ -129,6 +135,10 @@ def run_generate_whiteboard(image_path, output_dir, duration, fps, no_hand=False
         str(duration),
         "--fps",
         str(fps),
+        "--canvas-width",
+        str(canvas_width),
+        "--canvas-height",
+        str(canvas_height),
     ]
     if no_hand:
         cmd.append("--no-hand")
@@ -156,6 +166,8 @@ def generate_segment(task):
     fps = task["fps"]
     force = task["force"]
     no_hand = task["no_hand"]
+    canvas_width = task["canvas_width"]
+    canvas_height = task["canvas_height"]
     fingerprint = task["fingerprint"]
 
     reused = reuse_existing_segment(output_dir, index, force, fingerprint)
@@ -168,7 +180,15 @@ def generate_segment(task):
     segment_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[{index + 1}] Rendering {Path(image).name} ({duration}ms)")
-    ok, stdout, stderr = run_generate_whiteboard(image, str(segment_dir), duration, fps, no_hand=no_hand)
+    ok, stdout, stderr = run_generate_whiteboard(
+        image,
+        str(segment_dir),
+        duration,
+        fps,
+        no_hand=no_hand,
+        canvas_width=canvas_width,
+        canvas_height=canvas_height,
+    )
     if stdout:
         print(stdout, end="" if stdout.endswith("\n") else "\n")
     if not ok:
@@ -200,6 +220,8 @@ def main():
     parser.add_argument("--jobs", type=int, default=2, help="并发任务数")
     parser.add_argument("--force", action="store_true", help="忽略已存在的分段结果")
     parser.add_argument("--no-hand", action="store_true", help="禁用手部覆盖效果")
+    parser.add_argument("--canvas-width", type=int, default=1920, help="output canvas width")
+    parser.add_argument("--canvas-height", type=int, default=1080, help="output canvas height")
     args = parser.parse_args()
 
     images = args.images
@@ -232,7 +254,16 @@ def main():
             "fps": args.fps,
             "force": args.force,
             "no_hand": args.no_hand,
-            "fingerprint": segment_fingerprint(image, duration, args.fps, args.no_hand),
+            "canvas_width": args.canvas_width,
+            "canvas_height": args.canvas_height,
+            "fingerprint": segment_fingerprint(
+                image,
+                duration,
+                args.fps,
+                args.no_hand,
+                args.canvas_width,
+                args.canvas_height,
+            ),
         }
         for i, (image, duration) in enumerate(zip(images, durations))
     ]

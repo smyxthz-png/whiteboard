@@ -144,6 +144,41 @@ def read_env_values(env_path):
     return values
 
 
+def parse_resolution(value, fallback=(1920, 1080)):
+    import re
+    match = re.match(r'^\s*(\d+)\s*x\s*(\d+)\s*$', str(value or ''), re.IGNORECASE)
+    if not match:
+        return fallback
+    width = int(match.group(1))
+    height = int(match.group(2))
+    if width <= 0 or height <= 0:
+        return fallback
+    return width, height
+
+
+def normalize_image_size(value, aspect_ratio='16:9'):
+    normalized = (value or '').strip().lower()
+    legacy_sizes = {
+        '1920x1080': '1792x1008',
+        '1080x1920': '1008x1792',
+    }
+    if normalized in legacy_sizes:
+        return legacy_sizes[normalized]
+    if normalized in {'16:9', 'landscape', 'horizontal'}:
+        return '1792x1008'
+    if normalized in {'9:16', 'portrait', 'vertical'}:
+        return '1008x1792'
+    if normalized in {'1:1', 'square'}:
+        return '1024x1024'
+    if 'x' in normalized:
+        return normalized
+    return {
+        '16:9': '1792x1008',
+        '9:16': '1008x1792',
+        '1:1': '1024x1024',
+    }.get(aspect_ratio, '1792x1008')
+
+
 def image_generation_identity(skill_dir):
     env_values = read_env_values(os.path.join(skill_dir, '.env'))
     prompt_template_path = os.path.join(skill_dir, 'scripts', 'banana_prompt_template.py')
@@ -157,29 +192,50 @@ def image_generation_identity(skill_dir):
         normalized_provider = 't8_image2'
     elif provider in {'macode', 'macode_image2', 'image2', 'gpt-image-2'}:
         normalized_provider = 'macode_image2'
+    elif provider in {'kie', 'kie_ai', 'kie_image2', 'kieai', 'kie-gpt-image-2'}:
+        normalized_provider = 'kie_image2'
+    elif provider in {'apimart', 'api_mart', 'apimart_image2', 'apimart-gpt-image-2'}:
+        normalized_provider = 'apimart_image2'
     model = (
         os.environ.get('T8_IMAGE_MODEL')
         or env_values.get('T8_IMAGE_MODEL')
         or os.environ.get('MACODE_IMAGE_MODEL')
         or env_values.get('MACODE_IMAGE_MODEL')
-        or ('gpt-image-2' if normalized_provider in {'t8_image2', 'macode_image2'} else '')
+        or os.environ.get('KIE_IMAGE_MODEL')
+        or env_values.get('KIE_IMAGE_MODEL')
+        or os.environ.get('APIMART_IMAGE_MODEL')
+        or env_values.get('APIMART_IMAGE_MODEL')
+        or ('gpt-image-2' if normalized_provider in {'t8_image2', 'macode_image2', 'apimart_image2'} else '')
     ).strip()
-    size = (
+    raw_size = (
         os.environ.get('T8_IMAGE_SIZE')
         or env_values.get('T8_IMAGE_SIZE')
         or os.environ.get('MACODE_IMAGE_SIZE')
         or env_values.get('MACODE_IMAGE_SIZE')
+        or os.environ.get('APIMART_IMAGE_SIZE')
+        or env_values.get('APIMART_IMAGE_SIZE')
+        or ''
+    ).strip()
+    size = normalize_image_size(raw_size, '16:9')
+    resolution = (
+        os.environ.get('KIE_IMAGE_RESOLUTION')
+        or env_values.get('KIE_IMAGE_RESOLUTION')
+        or os.environ.get('APIMART_IMAGE_RESOLUTION')
+        or env_values.get('APIMART_IMAGE_RESOLUTION')
         or ''
     ).strip()
     quality = (
         os.environ.get('T8_IMAGE_QUALITY')
         or env_values.get('T8_IMAGE_QUALITY')
+        or os.environ.get('MACODE_IMAGE_QUALITY')
+        or env_values.get('MACODE_IMAGE_QUALITY')
         or ''
     ).strip()
     return {
         'provider': normalized_provider,
         'model': model,
         'size': size,
+        'resolution': resolution,
         'quality': quality,
         'prompt_template_hash': file_hash(prompt_template_path),
     }
@@ -780,7 +836,18 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
         return None
 
 
-def generate_whiteboard_videos(skill_dir, image_files, durations, video_dir, python_path, fps=30, jobs=2, force=False):
+def generate_whiteboard_videos(
+    skill_dir,
+    image_files,
+    durations,
+    video_dir,
+    python_path,
+    fps=30,
+    jobs=2,
+    force=False,
+    canvas_width=1920,
+    canvas_height=1080,
+):
     """生成白板动画视频"""
     print("\n[VIDEO] Generating whiteboard animation videos...")
 
@@ -808,6 +875,8 @@ def generate_whiteboard_videos(skill_dir, image_files, durations, video_dir, pyt
             '--output-dir', video_dir,
             '--fps', str(fps),
             '--jobs', str(jobs),
+            '--canvas-width', str(canvas_width),
+            '--canvas-height', str(canvas_height),
         ]
         if force:
             cmd.append('--force')
@@ -1125,10 +1194,14 @@ def main():
         durations = [scene['duration'] for scene in storyboard['scenes']]
 
     fps = args.fps or config.getint('Video', 'fps', fallback=30)
+    canvas_width, canvas_height = parse_resolution(config.get('Video', 'resolution', fallback='1920x1080'))
     jobs = args.jobs or config.getint('Advanced', 'whiteboard_jobs', fallback=2)
     fps = max(12, min(fps, 60))
     jobs = max(1, min(jobs, len(durations)))
-    print(f"[CONFIG] Whiteboard render: fps={fps}, jobs={jobs}, force={args.force_video_segments}")
+    print(
+        f"[CONFIG] Whiteboard render: fps={fps}, jobs={jobs}, "
+        f"canvas={canvas_width}x{canvas_height}, force={args.force_video_segments}"
+    )
 
     # 生成图片
     image_files = generate_images(
@@ -1151,6 +1224,8 @@ def main():
         fps=fps,
         jobs=jobs,
         force=args.force_video_segments,
+        canvas_width=canvas_width,
+        canvas_height=canvas_height,
     )
     if not video_files:
         sys.exit(1)

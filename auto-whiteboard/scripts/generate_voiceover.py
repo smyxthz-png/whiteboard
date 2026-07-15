@@ -102,6 +102,18 @@ def config_env(config, section, option, env_names, fallback=""):
     return config_get(config, section, option, fallback=fallback)
 
 
+def config_then_env(config, section, option, env_names, fallback=""):
+    """Prefer an explicit project setting, then fall back to environment."""
+    configured = config_get(config, section, option, fallback="").strip()
+    if configured:
+        return configured
+    for env_name in env_names:
+        value = os.environ.get(env_name)
+        if value:
+            return value
+    return fallback
+
+
 def parse_bool(value, fallback=False):
     if value is None or value == "":
         return fallback
@@ -229,7 +241,7 @@ def tts_cache_identity(config, reference_audio, tone):
         return {
             "provider": provider,
             "api_url": config_env(config, "MiniMax", "api_url", ["MINIMAX_API_URL", "AI302_MINIMAX_API_URL"], MINIMAX_DEFAULT_API_URL),
-            "model": config_env(config, "MiniMax", "model", ["MINIMAX_TTS_MODEL"], MINIMAX_DEFAULT_MODEL),
+            "model": config_then_env(config, "MiniMax", "model", ["MINIMAX_TTS_MODEL"], MINIMAX_DEFAULT_MODEL),
             "voice_id": config_env(config, "MiniMax", "voice_id", ["MINIMAX_VOICE_ID", "MINIMAX_TTS_VOICE_ID"], MINIMAX_DEFAULT_VOICE_ID),
             "speed": config_env(config, "MiniMax", "speed", ["MINIMAX_TTS_SPEED"], "1"),
             "vol": config_env(config, "MiniMax", "vol", ["MINIMAX_TTS_VOL"], "1"),
@@ -572,7 +584,7 @@ def load_minimax_settings(config):
             ["MINIMAX_API_URL", "AI302_MINIMAX_API_URL"],
             MINIMAX_DEFAULT_API_URL,
         ),
-        "model": config_env(config, "MiniMax", "model", ["MINIMAX_TTS_MODEL"], MINIMAX_DEFAULT_MODEL),
+        "model": config_then_env(config, "MiniMax", "model", ["MINIMAX_TTS_MODEL"], MINIMAX_DEFAULT_MODEL),
         "voice_id": config_env(
             config,
             "MiniMax",

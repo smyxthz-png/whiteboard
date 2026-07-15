@@ -162,7 +162,6 @@ DISPLAY_SUFFIXES = (
     "多年的",
     "年以上",
     "年的",
-    "多倍",
     "太瓦",
     "公斤",
     "公里",
@@ -172,7 +171,6 @@ DISPLAY_SUFFIXES = (
     "次",
     "吨",
     "米",
-    "倍",
     "年",
     "亿",
     "万",
@@ -184,6 +182,8 @@ def replace_number_with_suffix(match: re.Match[str]) -> str:
     number_text = match.group(1)
     suffix = match.group(2)
     if number_text in {"万", "亿", "万亿"}:
+        return match.group(0)
+    if number_text == "一" and suffix in {"次", "年", "年的", "多年的", "年以上"}:
         return match.group(0)
     value = chinese_int(number_text)
     if value is None:
@@ -232,7 +232,12 @@ def normalize_display_text(text: str) -> str:
     text = re.sub(fr"([{CN_SMALL_NUMBER_CHARS}]+)(至|到)", replace_range_left, text)
 
     # Conservative number+unit display conversion.
-    text = re.sub(fr"([{cn}]+)({DISPLAY_SUFFIX_RE})", replace_number_with_suffix, text)
+    # Keep natural approximations such as "几千年" and "数百年" in Chinese.
+    # A numeric rewrite here would produce awkward hybrids like "几1000年".
+    text = re.sub(fr"(?<![几数])([{cn}]+)({DISPLAY_SUFFIX_RE})", replace_number_with_suffix, text)
+
+    # MiniMax may already emit Arabic digits. Restore natural standalone time phrases.
+    text = re.sub(r"(?<!\d)1年(?!\d)", "一年", text)
 
     return text
 

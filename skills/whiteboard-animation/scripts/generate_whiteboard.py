@@ -70,6 +70,18 @@ def _hex_to_rgb(hex_color):
 BACKGROUND_RGB = np.array(_hex_to_rgb(BACKGROUND_HEX), dtype=np.uint8)
 BACKGROUND_BGR = BACKGROUND_RGB[::-1].copy()
 
+
+def imread_unicode(path, flags=cv2.IMREAD_COLOR):
+    """Read an image from a Windows path that may contain non-ASCII text."""
+    try:
+        encoded = np.fromfile(os.fspath(path), dtype=np.uint8)
+    except OSError:
+        return None
+    if encoded.size == 0:
+        return None
+    return cv2.imdecode(encoded, flags)
+
+
 def euc_dist(arr1, point):
     square_sub = (arr1 - point) ** 2
     return np.sqrt(np.sum(square_sub, axis=1))
@@ -134,7 +146,9 @@ def fit_image_to_canvas(img, target_wd, target_ht):
 
 
 def preprocess_hand_image(hand_path, variables):
-    hand_rgba = cv2.imread(hand_path, cv2.IMREAD_UNCHANGED)
+    hand_rgba = imread_unicode(hand_path, cv2.IMREAD_UNCHANGED)
+    if hand_rgba is None:
+        raise ValueError(f"Unable to read hand asset: {hand_path}")
     if hand_rgba.shape[2] == 4:
         # 透明背景 PNG：直接从 alpha 通道提取蒙版
         hand_mask = hand_rgba[:, :, 3]
@@ -1433,7 +1447,7 @@ def main():
 
     # 读取图片
     print(f"\n读取图片: {image_path}")
-    image_bgr = cv2.imread(image_path)
+    image_bgr = imread_unicode(image_path)
     if image_bgr is None:
         print(f"错误: 无法读取图片: {image_path}")
         sys.exit(1)

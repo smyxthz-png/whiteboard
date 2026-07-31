@@ -15,7 +15,9 @@ from datetime import datetime
 from pathlib import Path
 
 
-WORKFLOW_VERSION = "2026-07-12-locked-1920x1080-v1"
+WORKFLOW_VERSION = "2026-07-31-locked-1920x1080-v2"
+TARGET_VIDEO_WIDTH = 1920
+TARGET_VIDEO_HEIGHT = 1080
 
 
 if sys.platform == "win32":
@@ -119,10 +121,48 @@ def valid_media(path):
     return valid_file(path, 1024) and media_duration(path) > 0.05
 
 
+def media_dimensions(path):
+    if not valid_file(path, 1024):
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "json",
+                path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        streams = json.loads(result.stdout).get("streams", [])
+        if not streams:
+            return None
+        return int(streams[0]["width"]), int(streams[0]["height"])
+    except Exception:
+        return None
+
+
+def valid_whiteboard_media(path):
+    return (
+        valid_media(path)
+        and media_dimensions(path) == (TARGET_VIDEO_WIDTH, TARGET_VIDEO_HEIGHT)
+    )
+
+
 def latest_whiteboard_video(project_dir):
     candidates = sorted(Path(project_dir).glob("whiteboard_*.mp4"), key=lambda path: path.stat().st_mtime, reverse=True)
     for candidate in candidates:
-        if valid_media(str(candidate)):
+        if valid_whiteboard_media(str(candidate)):
             return str(candidate)
     return None
 
@@ -368,7 +408,7 @@ def main():
     print("=" * 72)
     whiteboard_result = state.get("steps", {}).get("whiteboard", {}).get("result", {}) if same_fingerprint else {}
     reusable_whiteboard = whiteboard_result.get("whiteboard_video_path") or latest_whiteboard_video(project_dir)
-    if same_fingerprint and not args.force_whiteboard and not args.force_images and valid_media(reusable_whiteboard):
+    if same_fingerprint and not args.force_whiteboard and not args.force_images and valid_whiteboard_media(reusable_whiteboard):
         result = {
             "whiteboard_video_path": os.path.abspath(reusable_whiteboard),
             "scene_count": whiteboard_result.get("scene_count", 0),

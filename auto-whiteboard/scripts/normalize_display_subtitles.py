@@ -132,6 +132,11 @@ def replace_alnum_digits(match: re.Match[str]) -> str:
     return f"{prefix}{number}"
 
 
+def replace_generation_label(match: re.Match[str]) -> str:
+    number = "".join(str(CN_DIGITS[ch]) for ch in match.group(1))
+    return f"{number}后"
+
+
 def replace_special_big_suffix(match: re.Match[str]) -> str:
     integer = chinese_int(match.group(1))
     if integer is None:
@@ -218,6 +223,10 @@ def normalize_display_text(text: str) -> str:
     # Mixed model names and products: B一零六七 -> B1067, V三 -> V3, 波音七四七 -> 波音747.
     text = re.sub(fr"([A-Za-z])([{simple}]+)", replace_alnum_digits, text)
     text = re.sub(fr"(波音)([{simple}]+)", replace_alnum_digits, text)
+
+    # Spoken generation labels use digit-by-digit pronunciation, while display text uses 90后/00后.
+    # "九十后" is intentionally excluded because 十 is not a simple digit character.
+    text = re.sub(fr"([{simple}]{{2}})后", replace_generation_label, text)
 
     # Percentages and decimals with explicit units.
     text = re.sub(fr"百分之([{cn}点]+)", replace_percent, text)

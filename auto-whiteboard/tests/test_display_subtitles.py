@@ -31,6 +31,13 @@ class DisplaySubtitleTests(unittest.TestCase):
         text = "二零二五年收入一百一十四亿美元，占百分之六十一"
         self.assertEqual(normalize.normalize_display_text(text), "2025年收入114亿美元，占61%")
 
+    def test_converts_spoken_generation_labels_for_display(self):
+        text = "但九零后和零零后消费占比不到百分之十五，九十后不是逐字标签"
+        self.assertEqual(
+            normalize.normalize_display_text(text),
+            "但90后和00后消费占比不到15%，九十后不是逐字标签",
+        )
+
     def test_project_model_overrides_old_environment_default(self):
         config = configparser.ConfigParser()
         config.read_dict({"MiniMax": {"model": "speech-2.8-turbo"}})

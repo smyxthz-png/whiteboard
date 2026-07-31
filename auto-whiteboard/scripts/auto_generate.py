@@ -299,6 +299,9 @@ def main():
         sys.exit(1)
     config = load_config(config_path)
     config_dir = os.path.dirname(config_path)
+    repo_root = Path(script_dir).parents[1]
+    whiteboard_renderer_path = repo_root / "skills" / "whiteboard-animation" / "scripts" / "generate_whiteboard.py"
+    whiteboard_hand_path = repo_root / "skills" / "whiteboard-animation" / "assets" / "drawing-hand-v2.png"
     default_bgm = config.get("Paths", "default_bgm", fallback="").strip()
     selected_bgm_path = resolve_bgm_path(args.bgm or default_bgm, base_dir=config_dir)
     output_dir = os.path.abspath(args.output_dir or config.get("Paths", "output_dir", fallback="./output"))
@@ -316,6 +319,8 @@ def main():
         "input_sha256": sha256_file(args.input),
         "config_path": config_path,
         "config_sha256": sha256_file(config_path),
+        "whiteboard_renderer": file_identity(whiteboard_renderer_path),
+        "whiteboard_hand": file_identity(whiteboard_hand_path),
         "bgm": file_identity(selected_bgm_path),
         "bgm_volume": args.bgm_volume,
         "whiteboard_overrides": {

@@ -16,7 +16,7 @@ from pathlib import Path
 # === 素材路径（相对于脚本位置） ===
 _SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 _ASSETS_DIR = _SCRIPT_DIR.parent / "assets"
-HAND_PATH = str(_ASSETS_DIR / "drawing-hand.png")
+HAND_PATH = str(_ASSETS_DIR / "drawing-hand-v2.png")
 
 # === 固定算法参数 ===
 FRAME_RATE = 30  # 输出视频帧率；30fps 对白板动画足够顺滑，生成帧数比 60fps 少一半
@@ -30,7 +30,7 @@ COLOR_PHASE_WEIGHT = 1  # 上色阶段时长权重；例如 2:1 表示手绘占 
 COLOR_BRUSH_RADIUS = 50  # 上色笔刷半径（像素）；越大上色越快、覆盖边缘越柔和
 SKIP_RATE = 4  # 每帧推进的网格步数基准；越大绘制越快，但运动更跳跃
 BACKGROUND_HEX = "#F6F1E3"  # 背景画布颜色
-HAND_TARGET_HT = 493  # 手部素材缩放后的目标高度（像素），基于 1080p 画布调优
+HAND_TARGET_HT = 1180  # 长手臂越过 1080p 画布底边，避免露出悬浮的截断末端
 BLACK_PIXEL_THRESHOLD = 10  # 判定为“黑色线稿像素”的阈值；越大越容易把深色算作线稿
 ASPECT_RATIO_TOLERANCE = 0.03
 PAPER_MIN_CHANNEL = 190

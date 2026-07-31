@@ -214,7 +214,7 @@ def srt_to_ass(srt_path, ass_path, config, video_width=1920, video_height=1080):
 
     # 获取字幕样式配置
     font = config.get('Subtitle', 'font', fallback='Microsoft YaHei')
-    font_size = config.getint('Subtitle', 'font_size', fallback=40)
+    font_size = config.getint('Subtitle', 'font_size', fallback=88)
     primary_color = config.get('Subtitle', 'primary_color', fallback='&H00FFFFFF')
     outline_color = config.get('Subtitle', 'outline_color', fallback='&H00000000')
     back_color = config.get('Subtitle', 'back_color', fallback='&H80000000')
@@ -223,7 +223,7 @@ def srt_to_ass(srt_path, ass_path, config, video_width=1920, video_height=1080):
     alignment = config.getint('Subtitle', 'alignment', fallback=2)
     margin_bottom = config.getint('Subtitle', 'margin_bottom', fallback=40)
     margin_lr = config.getint('Subtitle', 'margin_lr', fallback=20)
-    max_chars_per_line = config.getint('Subtitle', 'max_chars_per_line', fallback=18)
+    max_chars_per_line = config.getint('Subtitle', 'max_chars_per_line', fallback=20)
 
     # 创建 ASS 文件
     ass_header = f"""[Script Info]

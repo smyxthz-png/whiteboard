@@ -38,6 +38,13 @@ class DisplaySubtitleTests(unittest.TestCase):
             "但90后和00后消费占比不到15%，九十后不是逐字标签",
         )
 
+    def test_converts_mixed_myriad_numbers_without_splitting(self):
+        text = "二十一世纪地球八十亿人口，养一头牛要消耗一万五千升水"
+        self.assertEqual(
+            normalize.normalize_display_text(text),
+            "21世纪地球80亿人口，养一头牛要消耗15000升水",
+        )
+
     def test_project_model_overrides_old_environment_default(self):
         config = configparser.ConfigParser()
         config.read_dict({"MiniMax": {"model": "speech-2.8-turbo"}})

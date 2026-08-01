@@ -144,6 +144,13 @@ def replace_special_big_suffix(match: re.Match[str]) -> str:
     return f"{integer}{match.group(2)}"
 
 
+def replace_mixed_myriad_suffix(match: re.Match[str]) -> str:
+    value = chinese_int(match.group(1))
+    if value is None:
+        return match.group(0)
+    return f"{value}{match.group(2)}"
+
+
 def replace_chinese_amount_unit(match: re.Match[str]) -> str:
     value = chinese_int(match.group(1))
     if value is None:
@@ -171,6 +178,8 @@ DISPLAY_SUFFIXES = (
     "公斤",
     "公里",
     "小时",
+    "升",
+    "世纪",
     "颗",
     "枚",
     "次",
@@ -236,6 +245,10 @@ def normalize_display_text(text: str) -> str:
     # Keep "一百一十四亿美元" as "114亿美元", not "11400000000美元".
     text = re.sub(fr"([{CN_SMALL_NUMBER_CHARS}]+)(亿|万)(美元)", replace_chinese_amount_unit, text)
     text = re.sub(fr"([{cn}]+)(万亿美元|万亿)", replace_special_big_suffix, text)
+
+    # Mixed ten-thousand expressions must be converted as one number:
+    # 一万五千升 -> 15000升, rather than the malformed 1万五千升.
+    text = re.sub(fr"([{cn}]+万[{CN_SMALL_NUMBER_CHARS}]+)(升|世纪)", replace_mixed_myriad_suffix, text)
 
     # Range starts such as "六百五十至七百美元".
     text = re.sub(fr"([{CN_SMALL_NUMBER_CHARS}]+)(至|到)", replace_range_left, text)

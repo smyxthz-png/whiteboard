@@ -1,3 +1,4 @@
-pydub>=0.25.1
-anthropic>=0.18.0
-requests>=2.31.0
+pydub==0.25.1
+anthropic>=0.18.0,<1.0
+requests>=2.31.0,<3.0
+cli-302ai==1.0.2b2

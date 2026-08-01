@@ -1,0 +1,4 @@
+interface:
+  display_name: "YouTube Cover Generator"
+  short_description: "Generate locked-style whiteboard video covers"
+  default_prompt: "Generate a YouTube cover in the repository's locked editorial whiteboard style."

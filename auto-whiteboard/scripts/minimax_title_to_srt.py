@@ -10,6 +10,7 @@ sentence-level text plus timestamped_words with character-level timestamps.
 
 import json
 import math
+import re
 import sys
 import wave
 from dataclasses import dataclass
@@ -44,8 +45,6 @@ START_SILENCE_DELAY_MS = 350
 END_SEARCH_BEFORE_MS = 1500
 END_SEARCH_AFTER_MS = 800
 END_POSTROLL_MS = 160
-
-import re
 
 STRONG_BREAKS = set("。！？；：")
 COMMA_BREAKS = set("，")

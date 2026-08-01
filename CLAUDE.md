@@ -1,9 +1,10 @@
 # Claude Code Instructions
 
-Follow `AGENTS.md` first.
+Read `AGENTS.md` first, then follow `AGENT_RUNBOOK.md` exactly.
 
-Use `AGENT_RUNBOOK.md` for troubleshooting details and command variants.
+Use the repository Skills for media workflows:
 
-The intended outcome is to install dependencies, configure user-provided API keys, run `examples/demo_30s.txt`, and report the generated `final_video.mp4` path.
+- `skills/auto-whiteboard-video/SKILL.md`
+- `skills/youtube-cover-generator/SKILL.md`
 
-Do not reveal or commit API keys.
+Never expose API keys, never commit generated media, and do not change locked production defaults unless the user explicitly asks.

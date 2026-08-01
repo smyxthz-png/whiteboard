@@ -1,0 +1,3 @@
+-r auto-whiteboard/requirements.txt
+PyYAML==6.0.2
+ruff==0.12.7

@@ -6,4 +6,4 @@ PYTHON_BIN="$ROOT/.venv/bin/python"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="${PYTHON:-python3}"
 
 cd "$ROOT"
-"$PYTHON_BIN" "$ROOT/scripts/doctor.py"
+"$PYTHON_BIN" "$ROOT/scripts/doctor.py" "$@"

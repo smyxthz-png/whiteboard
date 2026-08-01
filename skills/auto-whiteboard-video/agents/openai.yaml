@@ -1,0 +1,4 @@
+interface:
+  display_name: "Auto Whiteboard Video"
+  short_description: "Turn Chinese transcripts into complete whiteboard videos"
+  default_prompt: "Generate a complete whiteboard video from my transcript and verify the final composition report."

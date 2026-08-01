@@ -1,163 +1,86 @@
-# Whiteboard Video Agent Runbook
+# Agent Runbook
 
-This runbook helps Codex, Claude Code, OpenClaw, and similar agents install and validate the project from a fresh clone.
+This runbook is the operational checklist for a fresh clone.
 
-## What This Project Does
-
-Input text becomes a whiteboard explainer video:
-
-1. Split text into short subtitle chunks.
-2. Generate MiniMax/302 voiceover and word-timed subtitles.
-3. Generate abstract whiteboard images with a `gpt-image-2` provider.
-4. Animate images into whiteboard drawing segments.
-5. Mix narration with low-volume piano BGM.
-6. Burn subtitles and compose the final MP4.
-7. Generate platform covers with a locked editorial whiteboard thumbnail style.
-
-Production video size is locked to `1920x1080`. GPT Image 2 source requests use `1792x1008`; downloaded images must be within 3% of 16:9 before they can enter the `1920x1080` whiteboard renderer. The ASS subtitle canvas and final MP4 remain `1920x1080`.
-
-## Required Tools
-
-- Python 3.11 or 3.12
-- ffmpeg and ffprobe available in PATH
-- Network access to selected TTS/image providers
-
-## Files That Must Exist After Bootstrap
-
-- `auto-whiteboard/config/config.ini`
-- `skills/whiteboard-video-workflow/.env`
-- `.venv/` at repository root
-- `skills/whiteboard-animation/.venv/`
-
-## Provider Configuration
-
-Default TTS:
-
-- `auto-whiteboard/config/config.ini`
-- `[TTS].provider = minimax`
-- `[MiniMax].api_key = <user key>`
-
-Default image provider:
-
-- `skills/whiteboard-video-workflow/.env`
-- `IMAGE_PROVIDER=apimart_image2`
-- `APIMART_API_KEY=<user key>`
-
-The configure script supports APIMart, Kie, T8, and macode-compatible providers.
-
-## Demo Command
-
-Use scripts when possible:
-
-```powershell
-.\scripts\run_demo.ps1
-```
-
-or:
+## 1. Inspect
 
 ```bash
-bash scripts/run_demo.sh
+git status --short
+python --version
+ffmpeg -version
+ffprobe -version
 ```
 
-Manual fallback:
+Use Python 3.11 or 3.12. Do not modify or delete unrelated user files in a dirty worktree.
 
-```bash
-python auto-whiteboard/scripts/auto_generate.py \
-  --input examples/demo_30s.txt \
-  --output-dir output/demo \
-  --project-dir output/demo/latest \
-  --bgm skills/whiteboard-animation/assets/bgm/relaxing-piano-for-sleeping-312507.mp3 \
-  --bgm-volume -28 \
-  --tts-concurrency 16 \
-  --whiteboard-jobs 4 \
-  --keep-temp \
-  --force-compose
-```
+## 2. Bootstrap
 
-## Expected Outputs
+Run the platform bootstrap script. It creates the root `.venv`, installs the pinned 302.AI CLI and Python dependencies, copies ignored local configuration templates, and prepares `skills/whiteboard-animation/.venv`.
 
-- `output/demo/latest/final_video.mp4`
-- `output/demo/latest/voiceover.wav`
-- `output/demo/latest/subtitles.srt`
-- `output/demo/latest/composition_report.json`
-- `output/demo/latest/run_state.json`
+Bootstrap is designed to be idempotent and may be run again after dependency changes.
 
-`composition_report.json` should report:
+## 3. Configure Secrets
 
-- `output_width: 1920`
-- `output_height: 1080`
-- `single_line_subtitles: true`
-- `output_av_delta_seconds < 0.1`
-
-## Troubleshooting
-
-If `config.ini` is missing:
+Interactive:
 
 ```bash
 python scripts/configure_keys.py
 ```
 
-If `.env` is missing:
+Non-interactive:
 
 ```bash
-python scripts/configure_keys.py
+python scripts/configure_keys.py \
+  --non-interactive \
+  --tts-key "$TTS_KEY" \
+  --image-provider apimart_image2 \
+  --image-key "$IMAGE_KEY" \
+  --cover-key "$AI302_KEY"
 ```
 
-If ffmpeg is missing:
+The script writes only ignored local files and masks secrets in its status output.
 
-- Windows: install from <https://www.gyan.dev/ffmpeg/builds/> or use Chocolatey.
-- macOS: `brew install ffmpeg`
-- Linux: `sudo apt-get install ffmpeg`
-
-If whiteboard rendering imports fail, run:
+## 4. Diagnose
 
 ```bash
-python skills/whiteboard-animation/scripts/setup_env.py
+python scripts/doctor.py
+python scripts/doctor.py --require-cover
 ```
 
-If image generation fails:
+The first command validates video generation. The second additionally requires a configured cover key. Doctor does not make billable API calls.
 
-- Confirm selected provider in `.env`.
-- Confirm image API key.
-- Confirm account balance/quota.
-- Reduce concurrency in `.env` if the provider rate limits.
+## 5. Run Demo
 
-If TTS fails:
+Use `scripts/run_demo.ps1` or `scripts/run_demo.sh`. The demo writes to the deterministic `output/demo/latest` directory so a failed run can resume.
 
-- Confirm `[MiniMax].api_key`.
-- Confirm `[MiniMax].api_url`.
-- Confirm provider balance/quota.
+Do not claim success only because the command exits. Verify the MP4 exists and inspect `composition_report.json`.
 
-## Cover Generation
+## 6. Generate User Content
 
-Use `scripts/generate_cover_302.py` for covers. Do not invent a new cover art direction for each platform; the script locks the preferred YouTube-style visual system and only changes dimensions.
+Use `skills/auto-whiteboard-video/SKILL.md`. Always provide a stable `--project-dir` derived from the requested project name. Use force flags only for stages that must be regenerated.
 
-```powershell
-.\.venv\Scripts\python.exe scripts\generate_cover_302.py `
-  --platform youtube `
-  --title "视频主标题" `
-  --subtitle "核心亮点" `
-  --topic "视频内容摘要" `
-  --subject "central visual subject" `
-  --left-context "origin or historical scene" `
-  --right-context "modern consequence scene" `
-  --timeline "节点1|节点2|节点3|节点4" `
-  --output output/covers/example_youtube.png
-```
+For covers, use `skills/youtube-cover-generator/SKILL.md`. Keep the approved art direction fixed and change only content and platform dimensions.
 
-Platform presets: `youtube`, `bilibili`, `wechat`, `xiaohongshu`, `douyin`, `kuaishou`. Override with `--width` and `--height` only when a platform has a specific delivery requirement.
+## 7. Troubleshoot
 
-## Security Checklist Before Pushing
+| Failure | First checks |
+| --- | --- |
+| `ffmpeg` missing | Install it and reopen the terminal so PATH refreshes. |
+| TTS 401/403 | Key placement, endpoint, account balance. |
+| Image failures | Provider selection, key, quota, concurrency, returned aspect ratio. |
+| Cover CLI missing | Re-run bootstrap; the executable lives in the root `.venv`. |
+| Whiteboard import error | Re-run `skills/whiteboard-animation/scripts/setup_env.py`. |
+| Slow rerun | Confirm the same `--project-dir` is used and force flags are absent. |
 
-Run:
+## 8. Pre-Commit Quality Gate
 
 ```bash
+python -m unittest discover -s auto-whiteboard/tests -p "test_*.py"
+python scripts/validate_repo.py
 python scripts/check_no_secrets.py
+python scripts/generate_cover_302.py --title "CI test" --dry-run
+git diff --check
 git status --short
 ```
 
-Make sure these files are not staged:
-
-- `auto-whiteboard/config/config.ini`
-- `skills/whiteboard-video-workflow/.env`
-- anything under `output/`
+Do not stage generated output or local credentials. Report any check that could not be run.

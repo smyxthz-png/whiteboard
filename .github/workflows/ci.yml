@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: auto-whiteboard/requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Lint Python sources
+        run: python -m ruff check auto-whiteboard scripts skills
+      - name: Compile Python sources
+        run: python -m compileall -q auto-whiteboard scripts skills
+      - name: Run unit tests
+        run: python -m unittest discover -s auto-whiteboard/tests -p "test_*.py"
+      - name: Validate repository contract
+        run: python scripts/validate_repo.py
+      - name: Scan tracked files for secrets
+        run: python scripts/check_no_secrets.py
+      - name: Dry-run cover prompt
+        run: python scripts/generate_cover_302.py --title "CI test" --dry-run

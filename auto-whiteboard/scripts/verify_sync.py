@@ -106,10 +106,10 @@ def verify_sync(srt_path, audio_path, tolerance=0.1):
 
         # 检查时间范围是否在音频范围内
         if entry['end'] > audio_duration + tolerance:
-            print(f"   [ERROR] 字幕结束时间超出音频时长！")
+            print("   [ERROR] 字幕结束时间超出音频时长！")
             all_ok = False
         else:
-            print(f"   [OK] 时间范围正常")
+            print("   [OK] 时间范围正常")
 
     # 总体验证
     print("\n" + "=" * 60)
@@ -127,7 +127,7 @@ def verify_sync(srt_path, audio_path, tolerance=0.1):
         print(f"[ERROR] 时长差异超过容差 ({tolerance}s)")
         all_ok = False
     else:
-        print(f"[OK] 时长匹配")
+        print("[OK] 时长匹配")
 
     print("\n" + "=" * 60)
     if all_ok:

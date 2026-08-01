@@ -83,6 +83,7 @@ def read_env(path: Path) -> dict[str, str]:
 
 def write_env(values: dict[str, str]) -> None:
     ordered_keys = [
+        "AI302_KEY",
         "IMAGE_PROVIDER",
         "APIMART_BASE_URL",
         "APIMART_API_KEY",
@@ -126,6 +127,7 @@ def write_env(values: dict[str, str]) -> None:
 def default_env_values() -> dict[str, str]:
     copy_if_missing(ENV_EXAMPLE, ENV_PATH)
     values = read_env(ENV_PATH)
+    values.setdefault("AI302_KEY", "")
     values.setdefault("IMAGE_PROVIDER", "apimart_image2")
     values.setdefault("APIMART_BASE_URL", "https://api.apimart.ai/v1")
     values.setdefault("APIMART_IMAGE_MODEL", "gpt-image-2")
@@ -169,6 +171,7 @@ def main() -> int:
     parser.add_argument("--tts-voice-id", default="Chinese (Mandarin)_Warm_Bestie")
     parser.add_argument("--image-provider", default="apimart_image2")
     parser.add_argument("--image-key", help="Image provider API key")
+    parser.add_argument("--cover-key", help="Optional 302.AI key used for cover generation")
     parser.add_argument("--image-base-url", help="Override image provider base URL")
     parser.add_argument("--image-concurrency", type=int, default=16)
     parser.add_argument("--whiteboard-jobs", type=int, default=max(1, min(4, (os.cpu_count() or 4) // 2)))
@@ -185,12 +188,15 @@ def main() -> int:
     tts_key = args.tts_key or config.get("MiniMax", "api_key", fallback="")
     image_key_name = provider_key_name(provider)
     image_key = args.image_key or env_values.get(image_key_name, "")
+    cover_key = args.cover_key or env_values.get("AI302_KEY", "") or os.environ.get("AI302_KEY", "")
 
     if not args.non_interactive:
         if not tts_key or "your_" in tts_key:
             tts_key = prompt_secret("MiniMax/302 API key", "")
         if not image_key or "your_" in image_key:
             image_key = prompt_secret(f"{provider} API key", "")
+        if not cover_key or "your_" in cover_key:
+            cover_key = prompt_secret("302.AI cover key (optional; press Enter to skip)", "")
 
     if not tts_key or "your_" in tts_key:
         raise SystemExit("Missing MiniMax/302 API key. Pass --tts-key or run interactively.")
@@ -215,6 +221,8 @@ def main() -> int:
 
     env_values["IMAGE_PROVIDER"] = provider
     env_values[image_key_name] = image_key
+    if cover_key and "your_" not in cover_key:
+        env_values["AI302_KEY"] = cover_key
     if args.image_base_url:
         base_key = {
             "apimart_image2": "APIMART_BASE_URL",
@@ -238,6 +246,7 @@ def main() -> int:
     print(f"  tts key: {mask(tts_key)}")
     print(f"  image provider: {provider}")
     print(f"  image key: {mask(image_key)}")
+    print(f"  cover key: {mask(cover_key) if cover_key else '<not configured>'}")
     return 0
 
 

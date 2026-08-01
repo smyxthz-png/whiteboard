@@ -1095,7 +1095,6 @@ def build_layout_blocks(active_grid):
         group_cols = [cell[1] for cell in group_cells]
         row_group_top = min(group_rows)
         row_group_bottom = max(group_rows)
-        group_height = row_group_bottom - row_group_top + 1
         row_group_profile = _classify_row_group(group_cells, n_cols)
         group_strategy = row_group_profile["group_strategy"]
 

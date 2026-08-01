@@ -324,7 +324,7 @@ def check_whiteboard_env(skill_dir):
             print("[WARN]  PYTHON_PATH not found, using system Python", file=sys.stderr)
             python_path = sys.executable
 
-        print(f"[OK] Environment check passed")
+        print("[OK] Environment check passed")
         print(f"   Python: {python_path}")
 
         return True, python_path
@@ -354,7 +354,7 @@ def init_dirs(skill_dir, output_dir, python_path):
         )
 
         if result.returncode != 0:
-            print(f"[ERROR] Directory creation failed", file=sys.stderr)
+            print("[ERROR] Directory creation failed", file=sys.stderr)
             print(result.stderr, file=sys.stderr)
             return None
 
@@ -362,7 +362,7 @@ def init_dirs(skill_dir, output_dir, python_path):
         for line in result.stdout.split('\n'):
             if line.strip().startswith('{'):
                 dirs = json.loads(line)
-                print(f"[OK] Directories created")
+                print("[OK] Directories created")
                 print(f"   Storyboard: {dirs['storyboardDir']}")
                 print(f"   Images: {dirs['imageDir']}")
                 print(f"   Videos: {dirs['videoDir']}")
@@ -399,7 +399,7 @@ def generate_groups(srt_path, storyboard_dir, python_path):
         print(result.stdout)
 
         if result.returncode != 0:
-            print(f"[ERROR] Groups generation failed", file=sys.stderr)
+            print("[ERROR] Groups generation failed", file=sys.stderr)
             print(result.stderr, file=sys.stderr)
             return None
 
@@ -434,7 +434,7 @@ def generate_storyboard(skill_dir, srt_path, groups_path, storyboard_dir, python
         print(result.stdout)
 
         if result.returncode != 0:
-            print(f"[ERROR] Storyboard generation failed", file=sys.stderr)
+            print("[ERROR] Storyboard generation failed", file=sys.stderr)
             print(result.stderr, file=sys.stderr)
             return None
 
@@ -643,7 +643,7 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
         )
 
         if result.returncode != 0:
-            print(f"[ERROR] Prompt generation failed", file=sys.stderr)
+            print("[ERROR] Prompt generation failed", file=sys.stderr)
             return None
 
         # 手动解码为UTF-8
@@ -740,13 +740,9 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
 
         temp_image_dir = None
         try:
-            # Read prompts back and pass as JSON string
-            with open(prompts_file, 'r', encoding='utf-8') as f:
-                prompts_json = f.read()
-
             temp_image_dir = tempfile.mkdtemp(prefix="_missing_images_", dir=image_cache_dir)
             print(f"[IMAGE] Calling generate-image.py with {len(prompt_tasks_to_generate)} prompts...")
-            print(f"[IMAGE] This may take 5-10 minutes for API calls...")
+            print("[IMAGE] This may take 5-10 minutes for API calls...")
 
             returncode, stdout_text = run_streamed(
                 [python_path, image_script, f"@{prompts_file}", '16:9', temp_image_dir],
@@ -765,7 +761,7 @@ def generate_images(skill_dir, storyboard_path, image_dir, python_path, force=Fa
             generated_results = parse_generated_image_results(stdout_text, len(prompt_tasks_to_generate))
 
         if returncode != 0:
-            print(f"[ERROR] Image generation failed", file=sys.stderr)
+            print("[ERROR] Image generation failed", file=sys.stderr)
 
         generated_files = None
         if generated_results is not None:
@@ -888,7 +884,7 @@ def generate_whiteboard_videos(
         returncode, stdout_text = run_streamed(cmd, env=env, timeout=1800)
 
         if returncode != 0:
-            print(f"[ERROR] Video generation failed", file=sys.stderr)
+            print("[ERROR] Video generation failed", file=sys.stderr)
             return None
 
         video_files = parse_batch_video_results(stdout_text, len(image_files))
@@ -969,7 +965,7 @@ def generate_audio(srt_path, output_dir, config_path, python_path):
             print(result.stdout)
 
         if result.returncode != 0:
-            print(f"[ERROR] TTS生成失败", file=sys.stderr)
+            print("[ERROR] TTS生成失败", file=sys.stderr)
             # 安全输出stderr
             if result.stderr:
                 print(result.stderr, file=sys.stderr)
@@ -1019,7 +1015,7 @@ def merge_videos(skill_dir, video_files, output_dir, audio_path, python_path):
         print(stdout_text)
 
         if result.returncode != 0:
-            print(f"[ERROR] Video merge failed", file=sys.stderr)
+            print("[ERROR] Video merge failed", file=sys.stderr)
             print(stderr_text, file=sys.stderr)
             return None
 
@@ -1061,7 +1057,7 @@ def merge_videos(skill_dir, video_files, output_dir, audio_path, python_path):
                     print("[OK] 字幕烧录成功")
                     merged_video = video_with_subtitle  # 使用带字幕的视频
                 else:
-                    print(f"[WARN] 字幕烧录失败，继续使用无字幕视频", file=sys.stderr)
+                    print("[WARN] 字幕烧录失败，继续使用无字幕视频", file=sys.stderr)
                     print(subtitle_result.stderr, file=sys.stderr)
             else:
                 print(f"[WARN] 字幕文件不存在: {srt_file}", file=sys.stderr)
@@ -1081,7 +1077,7 @@ def merge_videos(skill_dir, video_files, output_dir, audio_path, python_path):
             ], capture_output=True, text=True, timeout=600)
 
             if audio_merge_result.returncode != 0:
-                print(f"[WARN] 音频合并失败，使用无音频版本", file=sys.stderr)
+                print("[WARN] 音频合并失败，使用无音频版本", file=sys.stderr)
                 print(audio_merge_result.stderr, file=sys.stderr)
                 return merged_video
 
@@ -1252,7 +1248,7 @@ def main():
             print("  2. 网络连接问题", file=sys.stderr)
             print("  3. API限流或配额不足", file=sys.stderr)
             print("  4. RunningHub TTS服务不可用", file=sys.stderr)
-            print("  5. 音色文件未上传（运行: python scripts/upload_voices.py --batch）", file=sys.stderr)
+            print("  5. 检查当前 TTS 供应商的语音配置", file=sys.stderr)
             print("=" * 60, file=sys.stderr)
             sys.exit(1)
 

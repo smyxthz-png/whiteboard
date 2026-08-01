@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -17,6 +18,7 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+ENV_PATH = REPO_ROOT / "skills" / "whiteboard-video-workflow" / ".env"
 DEFAULT_MODEL = "gpt-image-2-t2i"
 
 PLATFORM_PRESETS: dict[str, tuple[int, int, str]] = {
@@ -164,14 +166,49 @@ def parse_json_stdout(stdout: str) -> dict[str, Any]:
     raise ValueError(f"Could not parse 302ai JSON output: {text[:500]}")
 
 
+def load_local_env() -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not ENV_PATH.exists():
+        return values
+    for line in ENV_PATH.read_text(encoding="utf-8-sig").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def find_302ai() -> str:
+    local_name = "302ai.exe" if os.name == "nt" else "302ai"
+    local_path = REPO_ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin") / local_name
+    if local_path.exists():
+        return str(local_path)
+    found = shutil.which("302ai")
+    if found:
+        return found
+    raise RuntimeError("302ai CLI not found. Run scripts/bootstrap.ps1 or scripts/bootstrap.sh first.")
+
+
+def command_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for key, value in load_local_env().items():
+        if value and key not in env:
+            env[key] = value
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    return env
+
+
 def run_302ai(command: list[str]) -> dict[str, Any]:
     result = subprocess.run(
-        command,
+        [find_302ai(), *command],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=command_env(),
     )
     if result.returncode != 0:
         message = (result.stderr or result.stdout).strip()
@@ -202,7 +239,6 @@ def create_image_async(args: argparse.Namespace, prompt: str, width: int, height
     extra = json.dumps({"quality": args.quality, "n": 1}, ensure_ascii=False)
     create_data = run_302ai(
         [
-            "302ai",
             "image",
             "create",
             "--prompt",
@@ -230,7 +266,7 @@ def create_image_async(args: argparse.Namespace, prompt: str, width: int, height
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
         time.sleep(args.poll_interval)
-        fetch_data = run_302ai(["302ai", "image", "fetch", taskid, "--short"])
+        fetch_data = run_302ai(["image", "fetch", taskid, "--short"])
         status = fetch_data.get("status")
         if status == "completed":
             return result_url(fetch_data)
@@ -243,7 +279,6 @@ def create_image_sync(args: argparse.Namespace, prompt: str, width: int, height:
     extra = json.dumps({"quality": args.quality, "n": 1}, ensure_ascii=False)
     data = run_302ai(
         [
-            "302ai",
             "image",
             "generate",
             "--prompt",
@@ -288,8 +323,9 @@ def main() -> int:
         print(f"[DRY RUN] Output would be: {output_path}")
         return 0
 
-    if not os.environ.get("AI302_KEY"):
-        print("[WARN] AI302_KEY is not set in the current environment. 302ai may still work if configured globally.", file=sys.stderr)
+    configured_key = os.environ.get("AI302_KEY") or load_local_env().get("AI302_KEY")
+    if not configured_key:
+        print("[WARN] AI302_KEY is not configured. Run scripts/configure_keys.py --cover-key <KEY>.", file=sys.stderr)
 
     image_url = create_image_sync(args, prompt, width, height) if args.sync else create_image_async(args, prompt, width, height)
     download(image_url, output_path)

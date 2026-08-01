@@ -1,107 +1,73 @@
-# Agent Install Guide
+# Agent Guide
 
-This repository is designed so an AI coding agent can install and run it for a user.
+This is the canonical entry point for Codex, Claude Code, OpenClaw, and other coding agents.
 
-Use this file first. Ignore older garbled quickstart files if they conflict with this guide.
+## Objective
 
-## Goal
+Install the project from a fresh clone, request only the required secrets, run the offline checks, generate the 30-second demo, and report verifiable output paths and metrics.
 
-Install the whiteboard video workflow, ask the user only for required API keys, run a short demo, and report the final video path.
+## Guardrails
 
-## Required User Secrets
+- Never print, commit, or echo complete API keys.
+- Never stage `auto-whiteboard/config/config.ini`, `skills/whiteboard-video-workflow/.env`, `output/`, or user transcripts unless explicitly requested.
+- Preserve the locked production defaults in `README.md`.
+- Reuse an existing `--project-dir` when resuming; do not regenerate expensive stages without a reason.
+- Treat `scripts/` as the canonical public interface. Do not use historical commands from old commits or generated reports.
 
-Ask the user for:
+## Required Inputs
 
-- MiniMax or 302.ai API key for TTS
-- One image API key for a `gpt-image-2` provider
+For video generation, ask for:
 
-Supported image providers:
+1. A MiniMax or 302.AI-compatible TTS key.
+2. One supported image-provider key.
 
-- `apimart_image2`
-- `kie_image2`
-- `t8_image2`
-- `macode_image2`
+For cover generation, also ask for a 302.AI key stored as `AI302_KEY`. Claude is optional and is not required by the default workflow.
 
-Do not ask for a Claude key unless the user wants AI text splitting. The default demo uses rule-based splitting.
+Supported image providers: `apimart_image2`, `kie_image2`, `t8_image2`, `macode_image2`.
 
-## Recommended Agent Flow
+## Install Sequence
 
-1. Inspect the repository root.
-2. Run bootstrap:
-   - Windows PowerShell: `.\scripts\bootstrap.ps1`
-   - macOS/Linux: `bash scripts/bootstrap.sh`
-3. Configure keys:
-   - Interactive: `python scripts/configure_keys.py`
-   - Non-interactive example:
-     `python scripts/configure_keys.py --tts-key <KEY> --image-provider apimart_image2 --image-key <KEY>`
-4. Run doctor:
-   - Windows PowerShell: `.\scripts\doctor.ps1`
-   - macOS/Linux: `bash scripts/doctor.sh`
-5. Run the 30 second demo:
-   - Windows PowerShell: `.\scripts\run_demo.ps1`
-   - macOS/Linux: `bash scripts/run_demo.sh`
-6. Report:
-   - final video path
-   - project directory
-   - duration, size, AV delta from `composition_report.json`
-
-## Optional Cover Generation
-
-Use `scripts/generate_cover_302.py` for platform covers. The visual style is fixed to the approved YouTube-style editorial whiteboard cover; only dimensions should change per platform.
-
-Example:
+Windows:
 
 ```powershell
-python scripts/generate_cover_302.py `
-  --platform youtube `
-  --title "视频主标题" `
-  --subtitle "核心亮点" `
-  --topic "视频内容摘要" `
-  --subject "central visual subject" `
-  --left-context "origin or historical scene" `
-  --right-context "modern consequence scene" `
-  --timeline "节点1|节点2|节点3|节点4" `
-  --output output/covers/example_youtube.png
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
+.\.venv\Scripts\python.exe scripts\configure_keys.py
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\run_demo.ps1
 ```
 
-Supported presets: `youtube`, `bilibili`, `wechat`, `xiaohongshu`, `douyin`, `kuaishou`.
+macOS/Linux:
 
-## Success Criteria
+```bash
+bash scripts/bootstrap.sh
+./.venv/bin/python scripts/configure_keys.py
+bash scripts/doctor.sh
+bash scripts/run_demo.sh
+```
 
-A successful demo creates:
+If covers are requested, run `scripts/doctor.py --require-cover` before generation.
+
+## Skills
+
+- `skills/auto-whiteboard-video`: generate a complete narrated whiteboard video from a transcript.
+- `skills/youtube-cover-generator`: generate YouTube and platform covers in the locked visual style.
+- `skills/whiteboard-animation`: internal renderer used by the main pipeline.
+- `skills/whiteboard-video-workflow`: internal storyboard and image-generation workflow.
+
+Read the relevant `SKILL.md` before executing that workflow.
+
+## Acceptance Criteria
+
+The demo must create:
 
 - `output/demo/latest/final_video.mp4`
 - `output/demo/latest/composition_report.json`
 
-The report should show:
+Read the report and confirm:
 
-- `output_width: 1920`
-- `output_height: 1080`
-- `single_line_subtitles: true`
-- `output_av_delta_seconds` less than `0.1`
+- `output_width = 1920`
+- `output_height = 1080`
+- `single_line_subtitles = true`
+- `output_av_delta_seconds < 0.1`
 
-## Important Rules
-
-- Never commit or print full API keys.
-- Never commit `auto-whiteboard/config/config.ini`.
-- Never commit `skills/whiteboard-video-workflow/.env`.
-- Do not commit `output/`, generated videos, generated images, or temporary files.
-- If API calls fail, first check provider balance, rate limits, and key placement.
-
-## Main Command
-
-After configuration, the core command is:
-
-```powershell
-python auto-whiteboard/scripts/auto_generate.py `
-  --input examples/demo_30s.txt `
-  --output-dir output/demo `
-  --project-dir output/demo/latest `
-  --bgm skills/whiteboard-animation/assets/bgm/relaxing-piano-for-sleeping-312507.mp3 `
-  --bgm-volume -28 `
-  --tts-concurrency 16 `
-  --whiteboard-jobs 4 `
-  --keep-temp
-```
-
-The default BGM is configured in `auto-whiteboard/config/config.ini`; the demo scripts also pass it explicitly.
+Before committing, run the checks listed in `AGENT_RUNBOOK.md` and leave unrelated user files untouched.

@@ -62,7 +62,7 @@ def mix_audio(voiceover_path, bgm_path, output_path, config):
     - output_path: 输出文件路径
     - config: 配置对象
     """
-    print(f"\n[AUDIO] 加载音频文件...")
+    print("\n[AUDIO] 加载音频文件...")
 
     # 获取音频时长
     voiceover_duration = get_audio_duration(voiceover_path)
@@ -77,7 +77,7 @@ def mix_audio(voiceover_path, bgm_path, output_path, config):
     fade_out = config.getint('Audio', 'fade_out', fallback=3000)
     loop_bgm = config.getboolean('Audio', 'loop_bgm', fallback=True)
 
-    print(f"\n[CONFIG] 音频处理...")
+    print("\n[CONFIG] 音频处理...")
 
     # 构建 ffmpeg 滤镜链
     # 1. 背景音乐处理：循环、音量、淡入淡出
@@ -102,7 +102,7 @@ def mix_audio(voiceover_path, bgm_path, output_path, config):
     print(f"  [EFFECT] 淡入: {fade_in}ms, 淡出: {fade_out}ms")
 
     # 2. 混音和标准化
-    print(f"\n[MIXER]  混音中...")
+    print("\n[MIXER]  混音中...")
 
     # 构建完整的 ffmpeg 命令
     cmd = [
@@ -118,15 +118,15 @@ def mix_audio(voiceover_path, bgm_path, output_path, config):
     ]
 
     try:
-        result = subprocess.run(
+        subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             check=True
         )
-        print(f"  [OK] 标准化完成")
+        print("  [OK] 标准化完成")
     except subprocess.CalledProcessError as e:
-        print(f"[ERROR] ffmpeg 混音失败:", file=sys.stderr)
+        print("[ERROR] ffmpeg 混音失败:", file=sys.stderr)
         print(f"命令: {' '.join(cmd)}", file=sys.stderr)
         print(f"错误输出: {e.stderr}", file=sys.stderr)
         sys.exit(1)
@@ -135,7 +135,7 @@ def mix_audio(voiceover_path, bgm_path, output_path, config):
     final_duration = get_audio_duration(output_path)
     file_size = os.path.getsize(output_path) / (1024 * 1024)
 
-    print(f"\n[SAVE] 导出音频...")
+    print("\n[SAVE] 导出音频...")
     print(f"  [OK] 输出: {output_path}")
     print(f"  [EMOJI]  时长: {final_duration:.2f}s")
     print(f"  [EMOJI] 大小: {file_size:.2f} MB")
@@ -190,7 +190,7 @@ def main():
     # 混音
     duration = mix_audio(args.voiceover, args.bgm, args.output, config)
 
-    print(f"\n[OK] 混音完成!")
+    print("\n[OK] 混音完成!")
 
     # 输出 JSON 结果
     result = {

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import importlib.metadata
 import json
 import os
 import shutil
@@ -45,6 +46,25 @@ def check_python_packages() -> dict:
         if result.returncode != 0:
             missing.append(package)
     return {"ok": not missing, "missing": missing}
+
+
+def check_cover_tool(require_key: bool = False) -> dict:
+    executable_name = "302ai.exe" if os.name == "nt" else "302ai"
+    local_executable = REPO_ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin") / executable_name
+    executable = str(local_executable) if local_executable.exists() else shutil.which("302ai")
+    try:
+        version = importlib.metadata.version("cli-302ai")
+    except importlib.metadata.PackageNotFoundError:
+        version = ""
+    values = load_env()
+    key_configured = is_real_value(os.environ.get("AI302_KEY") or values.get("AI302_KEY"))
+    return {
+        "ok": bool(executable and version) and (key_configured or not require_key),
+        "executable": executable or "",
+        "version": version,
+        "key_configured": key_configured,
+        "key_required": require_key,
+    }
 
 
 def load_env() -> dict[str, str]:
@@ -126,6 +146,7 @@ def check_animation_env() -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check local environment without making API calls")
     parser.add_argument("--json", action="store_true", help="Print compact JSON only")
+    parser.add_argument("--require-cover", action="store_true", help="Also require AI302_KEY for cover generation")
     args = parser.parse_args()
 
     checks = {
@@ -141,6 +162,7 @@ def main() -> int:
         "config": check_config(),
         "image_env": check_image_env(),
         "animation_env": check_animation_env(),
+        "cover_tool": check_cover_tool(args.require_cover),
     }
     all_ok = all(check.get("ok") for check in checks.values())
     result = {"ok": all_ok, "checks": checks}

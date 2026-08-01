@@ -202,7 +202,7 @@ def srt_to_ass(srt_path, ass_path, config, video_width=1920, video_height=1080):
     """
     将 SRT 转换为 ASS 格式（支持样式）
     """
-    print(f"\n[INFO] Converting subtitle format: SRT → ASS")
+    print("\n[INFO] Converting subtitle format: SRT → ASS")
 
     # 读取 SRT
     with open(srt_path, 'r', encoding='utf-8') as f:
@@ -279,7 +279,7 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
     """
     合成视频：烧录字幕 + 替换音频
     """
-    print(f"\n[STORYBOARD] 视频合成中...")
+    print("\n[STORYBOARD] 视频合成中...")
 
     # 创建临时 ASS 文件
     temp_dir = os.path.dirname(output_path)
@@ -333,7 +333,7 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
         output_path
     ]
 
-    print(f"  [CONFIG] ffmpeg 参数:")
+    print("  [CONFIG] ffmpeg 参数:")
     print(f"     视频编码: {codec}, CRF: {crf}, 预设: {preset}")
     print(f"     音频编码: {audio_codec}, 比特率: {audio_bitrate}")
     print(f"     视频尺寸: {video_info['width']}x{video_info['height']}")
@@ -351,7 +351,7 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
         )
 
         if result.returncode != 0:
-            print(f"[ERROR] ffmpeg 执行失败:", file=sys.stderr)
+            print("[ERROR] ffmpeg 执行失败:", file=sys.stderr)
             print(result.stderr, file=sys.stderr)
             sys.exit(1)
 
@@ -393,7 +393,7 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
     report_path = os.path.join(os.path.dirname(output_path), 'composition_report.json')
     write_json_atomic(report_path, report)
 
-    print(f"\n[OK] 视频合成完成!")
+    print("\n[OK] 视频合成完成!")
     print(f"  [OUTPUT] 输出: {output_path}")
     print(f"  [INFO] 大小: {file_size:.2f} MB")
     print(f"  [REPORT] 验收报告: {report_path}")

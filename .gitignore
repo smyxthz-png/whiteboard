@@ -1,5 +1,11 @@
+# Operating systems and editors
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
 .claude/
+
+# Python
 __pycache__/
 *.py[cod]
 .Python
@@ -7,29 +13,32 @@ __pycache__/
 venv/
 ENV/
 env/
+.pytest_cache/
+.ruff_cache/
 
+# Local credentials and configuration
 .env
 *.env
+!.env.example
 auto-whiteboard/config/config.ini
+skills/whiteboard-video-workflow/.env
+
+# Generated media and runtime state
+output/
+temp/
 auto-whiteboard/output/
 auto-whiteboard/temp/
-auto-whiteboard/input/*.txt
-auto-whiteboard/input/*.srt
-auto-whiteboard/COMPLETE_ANALYSIS.md
-auto-whiteboard/FIXES_APPLIED.md
-auto-whiteboard/TEST_STATUS.md
 skills/whiteboard-animation/.venv/
-skills/whiteboard-video-workflow/.env
 skills/whiteboard-video-workflow/test_output/
 *.log
 *.tmp
-
-output/
-temp/
-bgm/
-精准生成口播音频和字幕文件工作流/
 *.mp4
 *.mov
 *.avi
 *.rar
 *.zip
+
+# Local input material
+auto-whiteboard/input/*.txt
+auto-whiteboard/input/*.srt
+bgm/

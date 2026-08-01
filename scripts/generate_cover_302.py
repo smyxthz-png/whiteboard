@@ -190,6 +190,14 @@ def result_url(data: dict[str, Any]) -> str:
     raise RuntimeError(f"302ai response did not contain an image URL: {json.dumps(data, ensure_ascii=False)[:1000]}")
 
 
+def output_format_args(args: argparse.Namespace) -> list[str]:
+    # The current 302.AI gpt-image-2 endpoint rejects output_format even
+    # though the CLI exposes it as a common image option.
+    if args.model == "gpt-image-2-t2i":
+        return []
+    return ["--output_format", args.output_format]
+
+
 def create_image_async(args: argparse.Namespace, prompt: str, width: int, height: int) -> str:
     extra = json.dumps({"quality": args.quality, "n": 1}, ensure_ascii=False)
     create_data = run_302ai(
@@ -205,8 +213,7 @@ def create_image_async(args: argparse.Namespace, prompt: str, width: int, height
             str(width),
             "--height",
             str(height),
-            "--output_format",
-            args.output_format,
+            *output_format_args(args),
             "--extra",
             extra,
         ]
@@ -247,8 +254,7 @@ def create_image_sync(args: argparse.Namespace, prompt: str, width: int, height:
             str(width),
             "--height",
             str(height),
-            "--output_format",
-            args.output_format,
+            *output_format_args(args),
             "--extra",
             extra,
         ]

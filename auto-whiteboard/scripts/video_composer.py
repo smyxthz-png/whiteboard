@@ -314,7 +314,7 @@ def compose_video(video_path, srt_path, audio_path, output_path, config):
         f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
         f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=0xF6F1E3,"
         f"setsar=1,"
-        f"ass='{ass_path_escaped}'[v]"
+        f"ass=filename='{ass_path_escaped}'[v]"
     )
 
     cmd = [

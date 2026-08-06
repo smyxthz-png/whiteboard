@@ -69,6 +69,8 @@ choco install ffmpeg
 ```bash
 # macOS
 brew install ffmpeg
+# 如果 doctor 提示缺少 ass/libass 字幕滤镜：
+brew install ffmpeg-full
 
 # Ubuntu/Debian
 sudo apt-get update && sudo apt-get install -y ffmpeg

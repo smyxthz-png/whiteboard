@@ -1629,6 +1629,7 @@ def main():
                 else None,
                 "provider": provider,
             }
+            segment_count = len(segments)
 
         print("\n[SUCCESS] Voiceover and subtitles generated")
         print(f"[OUTPUT] voiceover: {voiceover_path}")

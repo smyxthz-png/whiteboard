@@ -16,6 +16,10 @@ VENV_PYTHON="$VENV/bin/python"
 
 cd "$ROOT"
 
+if [ -x /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg ]; then
+  export PATH="/opt/homebrew/opt/ffmpeg-full/bin:$PATH"
+fi
+
 echo "[1/6] Checking Python..."
 "$PYTHON_BIN" --version
 

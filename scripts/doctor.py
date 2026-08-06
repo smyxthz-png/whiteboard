@@ -9,6 +9,7 @@ import configparser
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -36,6 +37,26 @@ def check_command(command: str) -> dict:
     if not path:
         return {"ok": False, "error": f"{command} not found in PATH"}
     return {"ok": True, "path": path}
+
+
+def check_ffmpeg_ass_filter() -> dict:
+    executable = shutil.which("ffmpeg")
+    if not executable:
+        return {"ok": False, "error": "ffmpeg not found in PATH"}
+    result = subprocess.run(
+        [executable, "-hide_banner", "-filters"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    has_ass = bool(re.search(r"^\s*\.\.\s+ass\s+V->V", result.stdout, re.MULTILINE))
+    return {
+        "ok": result.returncode == 0 and has_ass,
+        "path": executable,
+        "filter": "ass",
+        "error": "ffmpeg lacks the libass subtitle filter; on macOS install brew install ffmpeg-full" if not has_ass else "",
+    }
 
 
 def check_python_packages() -> dict:
@@ -164,6 +185,7 @@ def main() -> int:
         },
         "ffmpeg": check_command("ffmpeg"),
         "ffprobe": check_command("ffprobe"),
+        "ffmpeg_ass_filter": check_ffmpeg_ass_filter(),
         "python_packages": check_python_packages(),
         "config": check_config(),
         "image_env": check_image_env(),

@@ -5,5 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="$ROOT/.venv/bin/python"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="${PYTHON:-python3}"
 
+if [ -x /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg ]; then
+  export PATH="/opt/homebrew/opt/ffmpeg-full/bin:$PATH"
+fi
+
 cd "$ROOT"
 "$PYTHON_BIN" "$ROOT/scripts/doctor.py" "$@"

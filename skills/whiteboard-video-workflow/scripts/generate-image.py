@@ -353,7 +353,7 @@ def request_gemini_image_sync(prompt, aspect_ratio):
         'contents': [{'parts': [{'text': prompt}]}],
         'generationConfig': {
             'responseModalities': ['IMAGE'],
-            'responseFormat': {'image': gemini_image_config(aspect_ratio)},
+            'imageConfig': gemini_image_config(aspect_ratio),
         },
     }
     payload = json.dumps(body, ensure_ascii=False).encode('utf-8')
@@ -1107,12 +1107,15 @@ async def run_batch(tasks, concurrency):
                     task['outputDir'], task['index'], task['total']
                 )
             except Exception as e:
-                results[i] = {'error': str(e), 'task': task}
+                results[i] = {'error': str(e), 'task': task, 'fatal': isinstance(e, FatalError)}
 
     await asyncio.gather(*(worker(i, t) for i, t in enumerate(tasks)))
 
     # Final retry pass: retry all failed tasks (with same concurrency limit)
-    failed_indices = [i for i, r in enumerate(results) if isinstance(r, dict) and r.get('error')]
+    failed_indices = [
+        i for i, r in enumerate(results)
+        if isinstance(r, dict) and r.get('error') and not r.get('fatal')
+    ]
     if failed_indices:
         print(f'\nRetrying {len(failed_indices)} failed tasks...')
         await asyncio.sleep(RETRY_BASE_DELAY_S)
@@ -1230,7 +1233,8 @@ async def main():
 
     # Output results as JSON for programmatic use
     print(f'\n__RESULTS__{json.dumps(results)}')
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

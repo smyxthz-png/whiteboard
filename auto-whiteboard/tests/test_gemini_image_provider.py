@@ -63,5 +63,18 @@ class GeminiImageProviderTests(unittest.TestCase):
         self.assertEqual(TTS.get_tts_provider(config), "gemini")
 
 
+class ImageFailureBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fatal_provider_error_is_not_retried(self):
+        task = {"prompt": "test", "aspectRatio": "16:9", "outputDir": "/tmp", "index": 0, "total": 1}
+        with patch.object(
+            GENERATE_IMAGE,
+            "generate_single",
+            side_effect=GENERATE_IMAGE.FatalError("unsupported location"),
+        ) as generate:
+            results = await GENERATE_IMAGE.run_batch([task], concurrency=1)
+        self.assertEqual(generate.call_count, 1)
+        self.assertTrue(results[0]["fatal"])
+
+
 if __name__ == "__main__":
     unittest.main()

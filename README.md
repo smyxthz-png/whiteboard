@@ -288,6 +288,10 @@ output/<project>/
 
 检查 `.env` 中的供应商、Key、余额、并发和 Base URL。频繁出现限流时降低 `*_IMAGE_CONCURRENCY`。
 
+使用 Gemini 时如果返回 `User location is not supported for the API use`，说明当前网络出口地区不在
+Gemini Developer API 支持范围。这不是 Key 或请求参数错误；请在遵守 Google 服务条款及当地法规的
+前提下，改用受支持地区的运行环境后再执行真实 TTS、生图和完整 demo。
+
 ### 图片比例错误或画面拉伸
 
 系统允许接近 16:9 的轻微偏差，但会拒绝明显的 3:2、方图或竖图。失败的场景使用 `--force-images` 重试。

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 from pathlib import Path
@@ -45,6 +46,9 @@ MINIMAX_DEFAULT_API_URL = "https://api.302.ai/minimaxi/v1/t2a_v2"
 MINIMAX_DEFAULT_MODEL = "speech-2.8-turbo"
 MINIMAX_DEFAULT_VOICE_ID = "Chinese (Mandarin)_Warm_Bestie"
 MINIMAX_DEFAULT_SKILL_DIR = str(Path.home() / ".codex" / "skills" / "minimax-tts-pipeline")
+GEMINI_DEFAULT_API_URL = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_DEFAULT_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+GEMINI_DEFAULT_VOICE = "Kore"
 INVALID_API_KEYS = {
     "",
     "your_api_key_here",
@@ -85,6 +89,8 @@ def get_tts_provider(config):
         return "fish"
     if provider in {"302", "302ai", "index_tts2", "index-tts2", "302_index_tts2", "302-index-tts2"}:
         return "index_tts2"
+    if provider in {"gemini", "gemini_tts", "google", "google_gemini"}:
+        return "gemini"
     return "runninghub"
 
 
@@ -237,6 +243,14 @@ def prepare_tts_sentence_records(sentences, config, output_dir=None, skip_clean=
 
 def tts_cache_identity(config, reference_audio, tone):
     provider = get_tts_provider(config)
+    if provider == "gemini":
+        return {
+            "provider": provider,
+            "api_url": config_env(config, "Gemini", "api_url", ["GEMINI_BASE_URL"], GEMINI_DEFAULT_API_URL),
+            "model": config_env(config, "Gemini", "tts_model", ["GEMINI_TTS_MODEL"], GEMINI_DEFAULT_TTS_MODEL),
+            "voice": config_env(config, "Gemini", "voice", ["GEMINI_TTS_VOICE"], GEMINI_DEFAULT_VOICE),
+            "language_code": config_env(config, "Gemini", "language_code", ["GEMINI_TTS_LANGUAGE_CODE"], "cmn-CN"),
+        }
     if provider == "minimax":
         return {
             "provider": provider,
@@ -1197,6 +1211,72 @@ def generate_tts_index_tts2(text, output_path, settings):
     return duration
 
 
+def load_gemini_tts_settings(config):
+    api_key = config_env(config, "Gemini", "api_key", ["GEMINI_API_KEY"], "").strip()
+    if not api_key or "your_" in api_key.lower():
+        raise RuntimeError("Please configure GEMINI_API_KEY or [Gemini].api_key")
+    return {
+        "api_key": api_key,
+        "api_url": config_env(config, "Gemini", "api_url", ["GEMINI_BASE_URL"], GEMINI_DEFAULT_API_URL).rstrip("/"),
+        "model": config_env(config, "Gemini", "tts_model", ["GEMINI_TTS_MODEL"], GEMINI_DEFAULT_TTS_MODEL),
+        "voice": config_env(config, "Gemini", "voice", ["GEMINI_TTS_VOICE"], GEMINI_DEFAULT_VOICE),
+        "language_code": config_env(config, "Gemini", "language_code", ["GEMINI_TTS_LANGUAGE_CODE"], "cmn-CN"),
+        "style": config_env(config, "Gemini", "style", ["GEMINI_TTS_STYLE"], "自然、清晰、适合知识解说"),
+        "timeout": config.getint("Gemini", "timeout", fallback=180),
+    }
+
+
+def extract_gemini_audio(response):
+    for candidate in response.get("candidates", []) if isinstance(response, dict) else []:
+        content = candidate.get("content", {}) if isinstance(candidate, dict) else {}
+        for part in content.get("parts", []) if isinstance(content, dict) else []:
+            inline_data = part.get("inlineData") or part.get("inline_data") if isinstance(part, dict) else None
+            if not isinstance(inline_data, dict):
+                continue
+            mime_type = inline_data.get("mimeType") or inline_data.get("mime_type") or ""
+            if str(mime_type).startswith("audio/") and inline_data.get("data"):
+                return inline_data["data"]
+    return None
+
+
+def generate_tts_gemini(text, output_path, settings):
+    body = {
+        "contents": [{"parts": [{"text": f"请严格朗读以下文字。语气：{settings['style']}。不要增加或删改内容。\n{text}"}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "languageCode": settings["language_code"],
+                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": settings["voice"]}},
+            },
+        },
+    }
+    url = f"{settings['api_url']}/models/{settings['model']}:generateContent"
+    response = requests.post(
+        url,
+        headers={"x-goog-api-key": settings["api_key"], "Content-Type": "application/json"},
+        json=body,
+        timeout=settings["timeout"],
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Gemini TTS HTTP {response.status_code}: {response.text[:1000]}")
+    try:
+        audio_b64 = extract_gemini_audio(response.json())
+    except ValueError as exc:
+        raise RuntimeError(f"Gemini TTS returned invalid JSON: {exc}") from exc
+    if not audio_b64:
+        raise RuntimeError("Gemini TTS response did not contain audio")
+    pcm = base64.b64decode(audio_b64)
+    with wave.open(output_path, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24000)
+        wav.writeframes(pcm)
+    duration = get_audio_duration(output_path)
+    if duration <= 0:
+        raise RuntimeError("Gemini TTS generated audio has zero duration")
+    return duration
+
+
 def generate_one_segment(idx, segment_record, audio_path, runtime, retries, cache_hash):
     tts_text = segment_record["tts_text"]
     subtitle_text = segment_record["subtitle_text"]
@@ -1209,6 +1289,8 @@ def generate_one_segment(idx, segment_record, audio_path, runtime, retries, cach
                 duration = generate_tts_fish(tts_text, audio_path, runtime["fish"])
             elif runtime["provider"] == "index_tts2":
                 duration = generate_tts_index_tts2(tts_text, audio_path, runtime["index_tts2"])
+            elif runtime["provider"] == "gemini":
+                duration = generate_tts_gemini(tts_text, audio_path, runtime["gemini"])
             else:
                 duration = generate_tts_runninghub(
                     tts_text,
@@ -1252,6 +1334,11 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
             "provider": "index_tts2",
             "index_tts2": index_tts2_settings,
         }
+    elif provider == "gemini":
+        runtime = {
+            "provider": "gemini",
+            "gemini": load_gemini_tts_settings(config),
+        }
     else:
         api_key = get_api_key(config)
         reference_audio, tone = load_voice_settings(config)
@@ -1285,7 +1372,7 @@ def prepare_segments(sentences, config, output_dir, concurrency, force_tts=False
 
     results = {}
     pending = []
-    segment_extension = ".wav" if provider == "index_tts2" else ".mp3"
+    segment_extension = ".wav" if provider in {"index_tts2", "gemini"} else ".mp3"
 
     for idx, segment_record in enumerate(segments, start=1):
         subtitle_text = segment_record["subtitle_text"]
@@ -1468,6 +1555,8 @@ def main():
         provider_limit = config.getint("FishAudio", "concurrency", fallback=5)
     elif provider == "index_tts2":
         provider_limit = config.getint("IndexTTS2", "concurrency", fallback=5)
+    elif provider == "gemini":
+        provider_limit = config.getint("Gemini", "concurrency", fallback=3)
     elif provider == "minimax":
         provider_limit = 1
     else:

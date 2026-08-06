@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,8 @@ PROVIDER_KEY_NAMES = {
     "t8star": "T8_API_KEY",
     "macode": "MACODE_API_KEY",
     "macode_image2": "MACODE_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "gemini_image": "GEMINI_API_KEY",
 }
 
 
@@ -97,7 +100,7 @@ def check_api_key() -> dict:
         supported = ", ".join(sorted(PROVIDER_KEY_NAMES))
         return {"ok": False, "provider": provider, "error": f"Unsupported IMAGE_PROVIDER. Supported: {supported}"}
 
-    if configured_value(values.get(key_name)):
+    if configured_value(os.environ.get(key_name) or values.get(key_name)):
         return {"ok": True, "provider": provider, "keyName": key_name}
 
     return {"ok": False, "provider": provider, "keyName": key_name, "error": f"{key_name} is not set in {env_file}"}

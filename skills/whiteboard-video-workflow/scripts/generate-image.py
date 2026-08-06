@@ -181,6 +181,8 @@ def get_image_provider():
         return 'kie_image2'
     if provider in {'apimart', 'api_mart', 'apimart_image2', 'apimart-gpt-image-2'}:
         return 'apimart_image2'
+    if provider in {'gemini', 'gemini_image', 'google', 'google_gemini'}:
+        return 'gemini_image'
     return 'runninghub'
 
 
@@ -198,6 +200,9 @@ def get_batch_concurrency():
     elif provider == 'apimart_image2':
         env_name = 'APIMART_IMAGE_CONCURRENCY'
         default_value = 8
+    elif provider == 'gemini_image':
+        env_name = 'GEMINI_IMAGE_CONCURRENCY'
+        default_value = 3
     else:
         env_name = 'IMAGE_BATCH_CONCURRENCY'
         default_value = BATCH_CONCURRENCY
@@ -240,6 +245,14 @@ def image_size_for_aspect_ratio(aspect_ratio):
     if provider == 'apimart_image2':
         return normalize_image_size(os.environ.get('APIMART_IMAGE_SIZE', '1792x1008'), aspect_ratio)
     return normalize_image_size('', aspect_ratio)
+
+
+def gemini_image_config(aspect_ratio):
+    config = {'aspectRatio': aspect_ratio}
+    image_size = os.environ.get('GEMINI_IMAGE_SIZE', '2K').strip().upper()
+    if image_size:
+        config['imageSize'] = image_size
+    return config
 
 
 def decode_data_uri(data_uri):
@@ -302,6 +315,70 @@ def request_openai_json_sync(method, url, api_key, body=None, timeout=180):
         raise RetryableError(f'Failed to parse image provider response: {e}')
     except Exception as e:
         raise RetryableError(str(e))
+
+
+def extract_gemini_image(response):
+    """Return the last non-thinking inline image from a Gemini response."""
+    images = []
+    for candidate in response.get('candidates', []) if isinstance(response, dict) else []:
+        content = candidate.get('content', {}) if isinstance(candidate, dict) else {}
+        for part in content.get('parts', []) if isinstance(content, dict) else []:
+            if not isinstance(part, dict) or part.get('thought'):
+                continue
+            inline_data = part.get('inlineData') or part.get('inline_data')
+            if not isinstance(inline_data, dict):
+                continue
+            data = inline_data.get('data')
+            mime_type = inline_data.get('mimeType') or inline_data.get('mime_type') or ''
+            if data and str(mime_type).startswith('image/'):
+                images.append(data)
+    return images[-1] if images else None
+
+
+def request_gemini_image_sync(prompt, aspect_ratio):
+    api_key = os.environ.get('GEMINI_API_KEY')
+    model = os.environ.get('GEMINI_IMAGE_MODEL', 'gemini-3.1-flash-image').strip()
+    base_url = os.environ.get(
+        'GEMINI_BASE_URL',
+        'https://generativelanguage.googleapis.com/v1',
+    ).strip().rstrip('/')
+    if not api_key:
+        raise FatalError('GEMINI_API_KEY not found. Set it in .env or environment variables.')
+    if not model:
+        raise FatalError('GEMINI_IMAGE_MODEL is empty.')
+    if not base_url.startswith('https://'):
+        raise FatalError('GEMINI_BASE_URL must use HTTPS.')
+
+    body = {
+        'contents': [{'parts': [{'text': prompt}]}],
+        'generationConfig': {
+            'responseModalities': ['IMAGE'],
+            'responseFormat': {'image': gemini_image_config(aspect_ratio)},
+        },
+    }
+    payload = json.dumps(body, ensure_ascii=False).encode('utf-8')
+    req = Request(f'{base_url}/models/{model}:generateContent', data=payload, method='POST')
+    req.add_header('Content-Type', 'application/json; charset=utf-8')
+    req.add_header('X-goog-api-key', api_key)
+    try:
+        with urlopen(req, timeout=180) as resp:
+            response = json.loads(resp.read().decode('utf-8'))
+    except HTTPError as e:
+        body_text = e.read().decode('utf-8', errors='replace')
+        if e.code in {400, 401, 403, 404}:
+            raise FatalError(f'Gemini HTTP {e.code}: {body_text}')
+        if e.code == 429:
+            raise RetryableError(f'Gemini HTTP 429 (rate limited): {body_text}', is_rate_limit=True)
+        raise RetryableError(f'Gemini HTTP {e.code}: {body_text}')
+    except json.JSONDecodeError as e:
+        raise RetryableError(f'Failed to parse Gemini response: {e}')
+    except Exception as e:
+        raise RetryableError(str(e))
+
+    image_data = extract_gemini_image(response)
+    if not image_data:
+        raise RetryableError('Gemini response did not contain a generated image.')
+    return {'data': [{'b64_json': image_data}]}
 
 
 def find_openai_image_response(value):
@@ -707,7 +784,7 @@ async def generate_openai_style_image(
         return existing
 
     async def _generate_once():
-        print(f'{tag}Submitting {provider_label} gpt-image-2 request...')
+        print(f'{tag}Submitting {provider_label} image request...')
         result = await asyncio.to_thread(request_fn, prompt, aspect_ratio)
         data = result.get('data') or []
         if not data:
@@ -778,6 +855,18 @@ async def generate_single_apimart(prompt, aspect_ratio, output_dir, index, total
     return await generate_openai_style_image(
         request_apimart_image_sync,
         'APIMart',
+        prompt,
+        aspect_ratio,
+        output_dir,
+        index,
+        total,
+    )
+
+
+async def generate_single_gemini(prompt, aspect_ratio, output_dir, index, total):
+    return await generate_openai_style_image(
+        request_gemini_image_sync,
+        'Gemini',
         prompt,
         aspect_ratio,
         output_dir,
@@ -957,6 +1046,8 @@ def download_file(url, dest_path):
 # --- Generate single image ---
 async def generate_single(prompt, aspect_ratio, output_dir, index, total):
     provider = get_image_provider()
+    if provider == 'gemini_image':
+        return await generate_single_gemini(prompt, aspect_ratio, output_dir, index, total)
     if provider == 't8_image2':
         return await generate_single_t8(prompt, aspect_ratio, output_dir, index, total)
     if provider == 'macode_image2':

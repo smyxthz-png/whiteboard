@@ -32,6 +32,8 @@ PROVIDERS = {
     "t8_image2": "t8_image2",
     "macode": "macode_image2",
     "macode_image2": "macode_image2",
+    "gemini": "gemini_image",
+    "gemini_image": "gemini_image",
 }
 
 
@@ -85,6 +87,11 @@ def write_env(values: dict[str, str]) -> None:
     ordered_keys = [
         "AI302_KEY",
         "IMAGE_PROVIDER",
+        "GEMINI_BASE_URL",
+        "GEMINI_API_KEY",
+        "GEMINI_IMAGE_MODEL",
+        "GEMINI_IMAGE_SIZE",
+        "GEMINI_IMAGE_CONCURRENCY",
         "APIMART_BASE_URL",
         "APIMART_API_KEY",
         "APIMART_IMAGE_MODEL",
@@ -129,6 +136,10 @@ def default_env_values() -> dict[str, str]:
     values = read_env(ENV_PATH)
     values.setdefault("AI302_KEY", "")
     values.setdefault("IMAGE_PROVIDER", "apimart_image2")
+    values.setdefault("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1")
+    values.setdefault("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
+    values.setdefault("GEMINI_IMAGE_SIZE", "2K")
+    values.setdefault("GEMINI_IMAGE_CONCURRENCY", "3")
     values.setdefault("APIMART_BASE_URL", "https://api.apimart.ai/v1")
     values.setdefault("APIMART_IMAGE_MODEL", "gpt-image-2")
     values.setdefault("APIMART_IMAGE_SIZE", "1792x1008")
@@ -161,12 +172,14 @@ def provider_key_name(provider: str) -> str:
         "kie_image2": "KIE_API_KEY",
         "t8_image2": "T8_API_KEY",
         "macode_image2": "MACODE_API_KEY",
+        "gemini_image": "GEMINI_API_KEY",
     }[provider]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Configure local API keys for the whiteboard video workflow")
-    parser.add_argument("--tts-key", help="MiniMax/302 API key")
+    parser.add_argument("--tts-provider", choices=("minimax", "gemini"), default="minimax")
+    parser.add_argument("--tts-key", help="TTS API key")
     parser.add_argument("--tts-api-url", default="https://api.302.ai/minimaxi/v1/t2a_v2")
     parser.add_argument("--tts-voice-id", default="Chinese (Mandarin)_Warm_Bestie")
     parser.add_argument("--image-provider", default="apimart_image2")
@@ -185,29 +198,47 @@ def main() -> int:
     config = ensure_config()
     env_values = default_env_values()
 
-    tts_key = args.tts_key or config.get("MiniMax", "api_key", fallback="")
+    tts_section = "Gemini" if args.tts_provider == "gemini" else "MiniMax"
+    tts_key = (
+        args.tts_key
+        or (os.environ.get("GEMINI_API_KEY", "") if args.tts_provider == "gemini" else "")
+        or config.get(tts_section, "api_key", fallback="")
+    )
     image_key_name = provider_key_name(provider)
-    image_key = args.image_key or env_values.get(image_key_name, "")
+    image_key = args.image_key or os.environ.get(image_key_name, "") or env_values.get(image_key_name, "")
     cover_key = args.cover_key or env_values.get("AI302_KEY", "") or os.environ.get("AI302_KEY", "")
 
     if not args.non_interactive:
         if not tts_key or "your_" in tts_key:
-            tts_key = prompt_secret("MiniMax/302 API key", "")
+            tts_key = prompt_secret(f"{args.tts_provider} TTS API key", "")
+        if provider == "gemini_image" and (not image_key or "your_" in image_key):
+            image_key = tts_key
         if not image_key or "your_" in image_key:
             image_key = prompt_secret(f"{provider} API key", "")
         if not cover_key or "your_" in cover_key:
             cover_key = prompt_secret("302.AI cover key (optional; press Enter to skip)", "")
 
+    if provider == "gemini_image" and args.tts_provider == "gemini" and (not image_key or "your_" in image_key):
+        image_key = tts_key
+
     if not tts_key or "your_" in tts_key:
-        raise SystemExit("Missing MiniMax/302 API key. Pass --tts-key or run interactively.")
+        raise SystemExit(f"Missing {args.tts_provider} TTS API key. Pass --tts-key or run interactively.")
     if not image_key or "your_" in image_key:
         raise SystemExit(f"Missing {provider} API key. Pass --image-key or run interactively.")
 
-    set_option(config, "TTS", "provider", "minimax")
+    set_option(config, "TTS", "provider", args.tts_provider)
     set_option(config, "TTS", "concurrency", "16")
-    set_option(config, "MiniMax", "api_key", tts_key)
-    set_option(config, "MiniMax", "api_url", args.tts_api_url)
-    set_option(config, "MiniMax", "voice_id", args.tts_voice_id)
+    if args.tts_provider == "gemini":
+        set_option(config, "Gemini", "api_key", tts_key)
+        set_option(config, "Gemini", "api_url", "https://generativelanguage.googleapis.com/v1beta")
+        set_option(config, "Gemini", "tts_model", "gemini-3.1-flash-tts-preview")
+        set_option(config, "Gemini", "voice", "Kore")
+        set_option(config, "Gemini", "language_code", "cmn-CN")
+        set_option(config, "Gemini", "concurrency", "3")
+    else:
+        set_option(config, "MiniMax", "api_key", tts_key)
+        set_option(config, "MiniMax", "api_url", args.tts_api_url)
+        set_option(config, "MiniMax", "voice_id", args.tts_voice_id)
     set_option(config, "MiniMax", "title_to_srt", "")
     set_option(config, "MiniMax", "skill_dir", "")
     set_option(config, "TextToSRT", "enable_ai_split", "false")
@@ -229,6 +260,7 @@ def main() -> int:
             "kie_image2": "KIE_BASE_URL",
             "t8_image2": "T8_BASE_URL",
             "macode_image2": "MACODE_BASE_URL",
+            "gemini_image": "GEMINI_BASE_URL",
         }[provider]
         env_values[base_key] = args.image_base_url
     concurrency_key = {
@@ -236,6 +268,7 @@ def main() -> int:
         "kie_image2": "KIE_IMAGE_CONCURRENCY",
         "t8_image2": "T8_IMAGE_CONCURRENCY",
         "macode_image2": "MACODE_IMAGE_CONCURRENCY",
+        "gemini_image": "GEMINI_IMAGE_CONCURRENCY",
     }[provider]
     env_values[concurrency_key] = str(args.image_concurrency)
     write_env(env_values)

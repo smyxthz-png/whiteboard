@@ -11,7 +11,7 @@ Prefer `skills/auto-whiteboard-video` for normal end-to-end requests. Use this S
 
 Provider configuration lives in the ignored `.env` beside this file. Create it through `scripts/configure_keys.py`; do not edit or print secrets during routine runs.
 
-Supported image providers are `apimart_image2`, `kie_image2`, `t8_image2`, and `macode_image2`.
+Supported image providers are `apimart_image2`, `kie_image2`, `t8_image2`, `macode_image2`, and `gemini_image`.
 
 ## Components
 

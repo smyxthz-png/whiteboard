@@ -134,7 +134,20 @@ Agent 或 CI 可使用非交互方式：
   --cover-key $env:AI302_KEY
 ```
 
-支持的图片供应商：`apimart_image2`、`kie_image2`、`t8_image2`、`macode_image2`。
+支持的图片供应商：`apimart_image2`、`kie_image2`、`t8_image2`、`macode_image2`、`gemini_image`（Google 官方 Gemini API）。
+
+只使用一个 Gemini Key 配置官方生图与中文配音（Gemini TTS 当前为 Preview）：
+
+```bash
+./.venv/bin/python scripts/configure_keys.py \
+  --tts-provider gemini \
+  --image-provider gemini_image
+```
+
+Gemini 默认使用 `gemini-3.1-flash-image` 生成 16:9、2K 图片，以及
+`gemini-3.1-flash-tts-preview`、`Kore` 声线生成普通话配音。可通过
+`GEMINI_IMAGE_MODEL`、`GEMINI_IMAGE_SIZE`、`GEMINI_TTS_MODEL` 和
+`GEMINI_TTS_VOICE` 覆盖。
 
 密钥只写入被 `.gitignore` 排除的本地文件。不要把 Key 放进逐字稿、README、命令历史或提交记录。
 

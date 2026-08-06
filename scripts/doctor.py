@@ -87,6 +87,7 @@ def check_config() -> dict:
     config.read(CONFIG_PATH, encoding="utf-8-sig")
     tts_provider = config.get("TTS", "provider", fallback="")
     minimax_key = config.get("MiniMax", "api_key", fallback="")
+    gemini_key = os.environ.get("GEMINI_API_KEY") or config.get("Gemini", "api_key", fallback="")
     default_bgm = config.get("Paths", "default_bgm", fallback="")
     bgm_ok = True
     bgm_path = ""
@@ -97,9 +98,13 @@ def check_config() -> dict:
         bgm_path = str(candidate)
         bgm_ok = candidate.exists()
     return {
-        "ok": tts_provider == "minimax" and is_real_value(minimax_key) and bgm_ok,
+        "ok": (
+            (tts_provider == "minimax" and is_real_value(minimax_key))
+            or (tts_provider == "gemini" and is_real_value(gemini_key))
+        ) and bgm_ok,
         "tts_provider": tts_provider,
         "minimax_key_configured": is_real_value(minimax_key),
+        "gemini_key_configured": is_real_value(gemini_key),
         "default_bgm": bgm_path,
         "default_bgm_exists": bgm_ok,
     }
@@ -116,9 +121,10 @@ def check_image_env() -> dict:
         "t8_image2": "T8_API_KEY",
         "macode_image2": "MACODE_API_KEY",
         "runninghub": "RUNNINGHUB_API_KEY",
+        "gemini_image": "GEMINI_API_KEY",
     }
     key_name = key_by_provider.get(provider)
-    key_value = values.get(key_name or "", "")
+    key_value = os.environ.get(key_name or "", "") or values.get(key_name or "", "")
     return {
         "ok": bool(key_name) and is_real_value(key_value),
         "provider": provider,

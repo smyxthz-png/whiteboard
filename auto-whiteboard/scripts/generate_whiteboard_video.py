@@ -196,8 +196,22 @@ def image_generation_identity(skill_dir):
         normalized_provider = 'kie_image2'
     elif provider in {'apimart', 'api_mart', 'apimart_image2', 'apimart-gpt-image-2'}:
         normalized_provider = 'apimart_image2'
-    model = (
-        os.environ.get('T8_IMAGE_MODEL')
+    elif provider in {'gemini', 'gemini_image', 'google', 'google_gemini'}:
+        normalized_provider = 'gemini_image'
+    if normalized_provider == 'gemini_image':
+        model = (
+            os.environ.get('GEMINI_IMAGE_MODEL')
+            or env_values.get('GEMINI_IMAGE_MODEL')
+            or 'gemini-3.1-flash-image'
+        ).strip()
+        raw_size = (
+            os.environ.get('GEMINI_IMAGE_SIZE')
+            or env_values.get('GEMINI_IMAGE_SIZE')
+            or '2K'
+        ).strip()
+    else:
+        model = (
+            os.environ.get('T8_IMAGE_MODEL')
         or env_values.get('T8_IMAGE_MODEL')
         or os.environ.get('MACODE_IMAGE_MODEL')
         or env_values.get('MACODE_IMAGE_MODEL')
@@ -206,17 +220,17 @@ def image_generation_identity(skill_dir):
         or os.environ.get('APIMART_IMAGE_MODEL')
         or env_values.get('APIMART_IMAGE_MODEL')
         or ('gpt-image-2' if normalized_provider in {'t8_image2', 'macode_image2', 'apimart_image2'} else '')
-    ).strip()
-    raw_size = (
-        os.environ.get('T8_IMAGE_SIZE')
+        ).strip()
+        raw_size = (
+            os.environ.get('T8_IMAGE_SIZE')
         or env_values.get('T8_IMAGE_SIZE')
         or os.environ.get('MACODE_IMAGE_SIZE')
         or env_values.get('MACODE_IMAGE_SIZE')
         or os.environ.get('APIMART_IMAGE_SIZE')
         or env_values.get('APIMART_IMAGE_SIZE')
         or ''
-    ).strip()
-    size = normalize_image_size(raw_size, '16:9')
+        ).strip()
+    size = raw_size if normalized_provider == 'gemini_image' else normalize_image_size(raw_size, '16:9')
     resolution = (
         os.environ.get('KIE_IMAGE_RESOLUTION')
         or env_values.get('KIE_IMAGE_RESOLUTION')

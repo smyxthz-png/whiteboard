@@ -18,12 +18,12 @@ Install the project from a fresh clone, request only the required secrets, run t
 
 For video generation, ask for:
 
-1. A MiniMax or 302.AI-compatible TTS key.
-2. One supported image-provider key.
+1. A MiniMax/302.AI-compatible TTS key, or a Gemini key when using Gemini TTS.
+2. One supported image-provider key. A single Gemini key can cover both Gemini TTS and images.
 
 For cover generation, also ask for a 302.AI key stored as `AI302_KEY`. Claude is optional and is not required by the default workflow.
 
-Supported image providers: `apimart_image2`, `kie_image2`, `t8_image2`, `macode_image2`.
+Supported image providers: `apimart_image2`, `kie_image2`, `t8_image2`, `macode_image2`, `gemini_image`.
 
 ## Install Sequence
 

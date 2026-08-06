@@ -36,6 +36,17 @@ class VoiceoverResultTests(unittest.TestCase):
         result = doctor.check_ffmpeg_ass_filter()
         self.assertIn("ok", result)
 
+    def test_missing_windows_subtitle_font_falls_back_to_cjk_font(self):
+        spec = importlib.util.spec_from_file_location("video_composer_font_test", COMPOSER_PATH)
+        assert spec and spec.loader
+        composer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(composer)
+        resolved = composer.resolve_subtitle_font("Microsoft YaHei")
+        self.assertIn(
+            resolved,
+            {"Microsoft YaHei", "Heiti SC", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Arial Unicode MS"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

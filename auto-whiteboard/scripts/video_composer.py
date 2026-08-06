@@ -198,6 +198,46 @@ def escape_ass_text(text):
     return text.replace('{', '(').replace('}', ')').replace('\n', ' ')
 
 
+def fontconfig_matches(font_name):
+    executable = shutil.which('fc-match')
+    if not executable:
+        return False
+    result = subprocess.run(
+        [executable, '-f', '%{family}\n', font_name],
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+    )
+    requested = font_name.strip().casefold()
+    families = {
+        family.strip().casefold()
+        for line in result.stdout.splitlines()
+        for family in line.split(',')
+        if family.strip()
+    }
+    return result.returncode == 0 and requested in families
+
+
+def resolve_subtitle_font(configured_font):
+    """Resolve a configured font to an installed CJK-capable family."""
+    configured_font = str(configured_font or '').strip() or 'Microsoft YaHei'
+    if os.name == 'nt' or not shutil.which('fc-match'):
+        return configured_font
+    candidates = (
+        configured_font,
+        'Heiti SC',
+        'PingFang SC',
+        'Hiragino Sans GB',
+        'Noto Sans CJK SC',
+        'Arial Unicode MS',
+    )
+    for candidate in candidates:
+        if fontconfig_matches(candidate):
+            return candidate
+    return configured_font
+
+
 def srt_to_ass(srt_path, ass_path, config, video_width=1920, video_height=1080):
     """
     将 SRT 转换为 ASS 格式（支持样式）
@@ -213,7 +253,10 @@ def srt_to_ass(srt_path, ass_path, config, video_width=1920, video_height=1080):
     matches = re.findall(pattern, srt_content, re.DOTALL)
 
     # 获取字幕样式配置
-    font = config.get('Subtitle', 'font', fallback='Microsoft YaHei')
+    configured_font = config.get('Subtitle', 'font', fallback='Microsoft YaHei')
+    font = resolve_subtitle_font(configured_font)
+    if font != configured_font:
+        print(f"  [FONT] 字幕字体回退: {configured_font} -> {font}")
     font_size = config.getint('Subtitle', 'font_size', fallback=88)
     primary_color = config.get('Subtitle', 'primary_color', fallback='&H00FFFFFF')
     outline_color = config.get('Subtitle', 'outline_color', fallback='&H00000000')
